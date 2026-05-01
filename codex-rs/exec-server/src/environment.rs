@@ -24,9 +24,10 @@ pub const CODEX_EXEC_SERVER_URL_ENV_VAR: &str = "CODEX_EXEC_SERVER_URL";
 
 /// Owns the execution/filesystem environments available to the Codex runtime.
 ///
-/// `EnvironmentManager` is a shared registry for concrete environments. Its
-/// default constructor preserves the legacy `CODEX_EXEC_SERVER_URL` behavior
-/// while provider-based construction accepts a provider-supplied snapshot.
+/// `EnvironmentManager` is a shared registry for concrete environments.
+/// `from_codex_home` preserves the legacy `CODEX_EXEC_SERVER_URL` behavior when
+/// no `environments.toml` file is present, while provider-based construction
+/// accepts a provider-supplied snapshot.
 ///
 /// Setting `CODEX_EXEC_SERVER_URL=none` disables environment access by leaving
 /// the default environment unset while still keeping an explicit local
@@ -46,19 +47,6 @@ pub struct EnvironmentManager {
 
 pub const LOCAL_ENVIRONMENT_ID: &str = "local";
 pub const REMOTE_ENVIRONMENT_ID: &str = "remote";
-
-#[derive(Clone, Debug)]
-pub struct EnvironmentManagerArgs {
-    pub local_runtime_paths: ExecServerRuntimePaths,
-}
-
-impl EnvironmentManagerArgs {
-    pub fn new(local_runtime_paths: ExecServerRuntimePaths) -> Self {
-        Self {
-            local_runtime_paths,
-        }
-    }
-}
 
 impl EnvironmentManager {
     /// Builds a test-only manager without configured sandbox helper paths.
@@ -90,14 +78,28 @@ impl EnvironmentManager {
         Self::from_default_provider_url(exec_server_url, local_runtime_paths).await
     }
 
-    /// Builds a manager from `CODEX_EXEC_SERVER_URL` and local runtime paths
-    /// used when creating local filesystem helpers.
-    pub async fn new(args: EnvironmentManagerArgs) -> Self {
-        let EnvironmentManagerArgs {
-            local_runtime_paths,
-        } = args;
-        let exec_server_url = std::env::var(CODEX_EXEC_SERVER_URL_ENV_VAR).ok();
-        Self::from_default_provider_url(exec_server_url, local_runtime_paths).await
+    /// Builds a manager from `CODEX_HOME` and local runtime paths used when
+    /// creating local filesystem helpers.
+    ///
+    /// If `CODEX_HOME/environments.toml` is present, it defines the configured
+    /// environments. Otherwise this preserves the legacy
+    /// `CODEX_EXEC_SERVER_URL` behavior. Callers that ignore user config
+    /// should use [`Self::from_env`] instead.
+    pub async fn from_codex_home(
+        codex_home: impl AsRef<std::path::Path>,
+        local_runtime_paths: ExecServerRuntimePaths,
+    ) -> Result<Self, ExecServerError> {
+        let provider = environment_provider_from_codex_home(codex_home.as_ref())?;
+        Self::from_provider(provider.as_ref(), local_runtime_paths).await
+    }
+
+    /// Builds a manager from the legacy environment-variable provider without
+    /// reading user config files from `CODEX_HOME`.
+    pub async fn from_env(
+        local_runtime_paths: ExecServerRuntimePaths,
+    ) -> Result<Self, ExecServerError> {
+        let provider = DefaultEnvironmentProvider::from_env();
+        Self::from_provider(&provider, local_runtime_paths).await
     }
 
     /// Builds a manager from `CODEX_HOME` and local runtime paths used when
