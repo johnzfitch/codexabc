@@ -433,6 +433,11 @@ pub(crate) async fn run_turn(
                 .await
                 .for_prompt(&turn_context.model_info.input_modalities)
         };
+        turn_context.session_telemetry.record_model_input_images(
+            &turn_context.turn_span(),
+            &turn_context.model_input_images,
+            &sampling_request_input,
+        );
 
         let sampling_request_input_messages = sampling_request_input
             .iter()

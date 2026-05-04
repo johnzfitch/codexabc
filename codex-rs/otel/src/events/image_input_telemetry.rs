@@ -1,16 +1,72 @@
-use codex_protocol::user_input::UserInput;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::ResponseItem;
 use serde::Serialize;
 use std::collections::BTreeSet;
-use std::io::Read;
 use std::path::Path;
-
-const IMAGE_HEADER_READ_LIMIT: u64 = 64 * 1024;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ImageInputTelemetry {
+pub(crate) struct ImageInputTelemetrySnapshot {
     pub(crate) details_json: String,
-    pub(crate) image_types: String,
-    pub(crate) mime_types: String,
+    pub(crate) image_types: Vec<String>,
+    pub(crate) mime_types: Vec<String>,
+    pub(crate) message_image_count: usize,
+    pub(crate) tool_output_image_count: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ModelInputImageTelemetry {
+    state: Arc<Mutex<ImageInputTelemetryState>>,
+}
+
+impl ModelInputImageTelemetry {
+    pub(crate) fn record_items(&self, items: &[ResponseItem]) -> ImageInputTelemetrySnapshot {
+        let request = model_input_image_telemetry(items);
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.accumulate(request);
+        state.snapshot()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ImageInputTelemetryState {
+    details: Vec<ImageInputDetail>,
+    image_types: BTreeSet<String>,
+    mime_types: BTreeSet<String>,
+    message_image_count: usize,
+    tool_output_image_count: usize,
+}
+
+impl ImageInputTelemetryState {
+    fn accumulate(&mut self, request: Self) {
+        self.message_image_count = self.message_image_count.max(request.message_image_count);
+        self.tool_output_image_count = self
+            .tool_output_image_count
+            .max(request.tool_output_image_count);
+        self.image_types.extend(request.image_types);
+        self.mime_types.extend(request.mime_types);
+        if request.details.len() > self.details.len() {
+            self.details = request.details;
+        }
+    }
+
+    fn snapshot(&self) -> ImageInputTelemetrySnapshot {
+        let details_json =
+            serde_json::to_string(&self.details).unwrap_or_else(|_| "[]".to_string());
+
+        ImageInputTelemetrySnapshot {
+            details_json,
+            image_types: self.image_types.iter().cloned().collect(),
+            mime_types: self.mime_types.iter().cloned().collect(),
+            message_image_count: self.message_image_count,
+            tool_output_image_count: self.tool_output_image_count,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -21,115 +77,113 @@ struct ImageInputDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    width: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    height: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     byte_length: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     extension: Option<String>,
 }
 
-pub(crate) fn image_input_telemetry(items: &[UserInput]) -> Option<ImageInputTelemetry> {
-    let details: Vec<ImageInputDetail> = items
-        .iter()
-        .filter_map(|item| match item {
-            UserInput::Image { image_url } => Some(remote_or_data_url_detail(image_url)),
-            UserInput::LocalImage { path } => Some(local_image_detail(path)),
-            UserInput::Text { .. } | UserInput::Skill { .. } | UserInput::Mention { .. } => None,
-            _ => None,
-        })
-        .collect();
+fn model_input_image_telemetry(items: &[ResponseItem]) -> ImageInputTelemetryState {
+    let mut details: Vec<ImageInputDetail> = Vec::new();
+    let mut message_image_count = 0;
+    let mut tool_output_image_count = 0;
 
-    if details.is_empty() {
-        return None;
+    for item in items {
+        match item {
+            ResponseItem::Message { content, .. } => {
+                for content_item in content {
+                    if let ContentItem::InputImage { image_url, .. } = content_item {
+                        message_image_count += 1;
+                        details.push(image_url_detail("message", image_url));
+                    }
+                }
+            }
+            ResponseItem::FunctionCallOutput { output, .. } => {
+                if let Some(content_items) = output.content_items() {
+                    tool_output_image_count += collect_tool_output_image_details(
+                        "tool_output",
+                        content_items,
+                        &mut details,
+                    );
+                }
+            }
+            ResponseItem::CustomToolCallOutput { output, .. } => {
+                if let Some(content_items) = output.content_items() {
+                    tool_output_image_count += collect_tool_output_image_details(
+                        "custom_tool_output",
+                        content_items,
+                        &mut details,
+                    );
+                }
+            }
+            _ => {}
+        }
     }
 
-    let image_types = comma_join(
+    let image_types = collect_unique_strings(
         details
             .iter()
             .filter_map(|detail| detail.image_type.as_deref()),
     );
-    let mime_types = comma_join(
+    let mime_types = collect_unique_strings(
         details
             .iter()
             .filter_map(|detail| detail.mime_type.as_deref()),
     );
-    let details_json = serde_json::to_string(&details).ok()?;
 
-    Some(ImageInputTelemetry {
-        details_json,
+    ImageInputTelemetryState {
+        details,
         image_types,
         mime_types,
-    })
+        message_image_count,
+        tool_output_image_count,
+    }
 }
 
-fn remote_or_data_url_detail(image_url: &str) -> ImageInputDetail {
-    if let Some(detail) = data_url_detail(image_url) {
+fn collect_tool_output_image_details(
+    source: &'static str,
+    content_items: &[FunctionCallOutputContentItem],
+    details: &mut Vec<ImageInputDetail>,
+) -> usize {
+    let mut image_count = 0;
+    for content_item in content_items {
+        if let FunctionCallOutputContentItem::InputImage { image_url, .. } = content_item {
+            details.push(image_url_detail(source, image_url));
+            image_count += 1;
+        }
+    }
+    image_count
+}
+
+fn image_url_detail(source: &'static str, image_url: &str) -> ImageInputDetail {
+    if let Some(detail) = data_url_detail(source, image_url) {
         return detail;
     }
 
     let extension = safe_image_extension_from_url(image_url);
     let mime_type = extension.as_deref().and_then(mime_type_from_extension);
     ImageInputDetail {
-        source: "remote_url",
+        source,
         image_type: mime_type.as_deref().and_then(image_type_from_mime),
         mime_type,
-        width: None,
-        height: None,
         byte_length: None,
         extension,
     }
 }
 
-fn data_url_detail(image_url: &str) -> Option<ImageInputDetail> {
+fn data_url_detail(source: &'static str, image_url: &str) -> Option<ImageInputDetail> {
     let image_url = strip_data_scheme(image_url)?;
     let (metadata, payload) = image_url.split_once(',')?;
     let mut metadata_parts = metadata.split(';');
-    let mime_type = metadata_parts.next()?.to_ascii_lowercase();
-    if !mime_type.starts_with("image/") {
-        return None;
-    }
+    let mime_type = normalize_known_image_mime(metadata_parts.next()?)?;
     let is_base64 = metadata_parts.any(|part| part.eq_ignore_ascii_case("base64"));
 
     Some(ImageInputDetail {
-        source: "data_url",
+        source,
         image_type: image_type_from_mime(&mime_type),
         mime_type: Some(mime_type),
-        width: None,
-        height: None,
         byte_length: is_base64.then(|| base64_payload_byte_len(payload)),
         extension: None,
     })
-}
-
-fn local_image_detail(path: &Path) -> ImageInputDetail {
-    let extension = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
-        .filter(|extension| mime_type_from_extension(extension).is_some());
-
-    let byte_length = path.metadata().ok().map(|metadata| metadata.len());
-    let header = read_image_header(path).unwrap_or_default();
-    let header_info = image_info_from_header(&header);
-    let mime_type = header_info
-        .as_ref()
-        .map(|info| info.mime_type.to_string())
-        .or_else(|| extension.as_deref().and_then(mime_type_from_extension));
-
-    ImageInputDetail {
-        source: "local_file",
-        image_type: mime_type
-            .as_deref()
-            .and_then(image_type_from_mime)
-            .or(extension.clone()),
-        mime_type,
-        width: header_info.as_ref().and_then(|info| info.width),
-        height: header_info.as_ref().and_then(|info| info.height),
-        byte_length,
-        extension,
-    }
 }
 
 fn strip_data_scheme(image_url: &str) -> Option<&str> {
@@ -140,104 +194,6 @@ fn strip_data_scheme(image_url: &str) -> Option<&str> {
     image_url.get(5..)
 }
 
-fn read_image_header(path: &Path) -> std::io::Result<Vec<u8>> {
-    let file = std::fs::File::open(path)?;
-    let mut header = Vec::new();
-    file.take(IMAGE_HEADER_READ_LIMIT)
-        .read_to_end(&mut header)?;
-    Ok(header)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HeaderImageInfo {
-    mime_type: &'static str,
-    width: Option<u32>,
-    height: Option<u32>,
-}
-
-fn image_info_from_header(bytes: &[u8]) -> Option<HeaderImageInfo> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.len() >= 24 {
-        return Some(HeaderImageInfo {
-            mime_type: "image/png",
-            width: Some(u32::from_be_bytes(bytes[16..20].try_into().ok()?)),
-            height: Some(u32::from_be_bytes(bytes[20..24].try_into().ok()?)),
-        });
-    }
-
-    if (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) && bytes.len() >= 10 {
-        return Some(HeaderImageInfo {
-            mime_type: "image/gif",
-            width: Some(u16::from_le_bytes(bytes[6..8].try_into().ok()?) as u32),
-            height: Some(u16::from_le_bytes(bytes[8..10].try_into().ok()?) as u32),
-        });
-    }
-
-    if bytes.starts_with(b"\xff\xd8") {
-        return jpeg_info_from_header(bytes);
-    }
-
-    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && bytes[8..12] == *b"WEBP" {
-        return Some(HeaderImageInfo {
-            mime_type: "image/webp",
-            width: None,
-            height: None,
-        });
-    }
-
-    None
-}
-
-fn jpeg_info_from_header(bytes: &[u8]) -> Option<HeaderImageInfo> {
-    let mut i = 2;
-    while i + 4 <= bytes.len() {
-        if bytes[i] != 0xff {
-            i += 1;
-            continue;
-        }
-        while i < bytes.len() && bytes[i] == 0xff {
-            i += 1;
-        }
-        if i >= bytes.len() {
-            break;
-        }
-
-        let marker = bytes[i];
-        i += 1;
-        if marker == 0xd9 || marker == 0xda {
-            break;
-        }
-        if i + 2 > bytes.len() {
-            break;
-        }
-
-        let segment_len = u16::from_be_bytes(bytes[i..i + 2].try_into().ok()?) as usize;
-        if segment_len < 2 || i + segment_len > bytes.len() {
-            break;
-        }
-        if is_jpeg_start_of_frame(marker) && segment_len >= 7 {
-            return Some(HeaderImageInfo {
-                mime_type: "image/jpeg",
-                width: Some(u16::from_be_bytes(bytes[i + 5..i + 7].try_into().ok()?) as u32),
-                height: Some(u16::from_be_bytes(bytes[i + 3..i + 5].try_into().ok()?) as u32),
-            });
-        }
-        i += segment_len;
-    }
-
-    Some(HeaderImageInfo {
-        mime_type: "image/jpeg",
-        width: None,
-        height: None,
-    })
-}
-
-fn is_jpeg_start_of_frame(marker: u8) -> bool {
-    matches!(
-        marker,
-        0xc0 | 0xc1 | 0xc2 | 0xc3 | 0xc5 | 0xc6 | 0xc7 | 0xc9 | 0xca | 0xcb | 0xcd | 0xce | 0xcf
-    )
-}
-
 fn safe_image_extension_from_url(url: &str) -> Option<String> {
     let path = url.split(['?', '#']).next().unwrap_or(url);
     let extension = Path::new(path)
@@ -246,6 +202,21 @@ fn safe_image_extension_from_url(url: &str) -> Option<String> {
         .map(str::to_ascii_lowercase)?;
     mime_type_from_extension(&extension)?;
     Some(extension)
+}
+
+fn normalize_known_image_mime(mime_type: &str) -> Option<String> {
+    match mime_type.trim().to_ascii_lowercase().as_str() {
+        "image/png" => Some("image/png".to_string()),
+        "image/jpeg" | "image/jpg" => Some("image/jpeg".to_string()),
+        "image/gif" => Some("image/gif".to_string()),
+        "image/webp" => Some("image/webp".to_string()),
+        "image/bmp" => Some("image/bmp".to_string()),
+        "image/heic" => Some("image/heic".to_string()),
+        "image/heif" => Some("image/heif".to_string()),
+        "image/tiff" => Some("image/tiff".to_string()),
+        "image/svg+xml" => Some("image/svg+xml".to_string()),
+        _ => None,
+    }
 }
 
 fn mime_type_from_extension(extension: &str) -> Option<String> {
@@ -274,10 +245,6 @@ fn base64_payload_byte_len(payload: &str) -> u64 {
     ((trimmed.len() * 3) / 4) as u64
 }
 
-fn comma_join<'a>(values: impl Iterator<Item = &'a str>) -> String {
-    values
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>()
-        .join(",")
+fn collect_unique_strings<'a>(values: impl Iterator<Item = &'a str>) -> BTreeSet<String> {
+    values.map(str::to_string).collect()
 }
