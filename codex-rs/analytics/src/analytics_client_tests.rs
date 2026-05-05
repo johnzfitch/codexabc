@@ -9,6 +9,8 @@ use crate::events::CodexCompactionEventRequest;
 use crate::events::CodexHookRunEventRequest;
 use crate::events::CodexPluginEventRequest;
 use crate::events::CodexPluginUsedEventRequest;
+use crate::events::CodexReviewEventParams;
+use crate::events::CodexReviewEventRequest;
 use crate::events::CodexRuntimeMetadata;
 use crate::events::CodexToolItemEventBase;
 use crate::events::CodexTurnEventRequest;
@@ -18,6 +20,11 @@ use crate::events::GuardianReviewEventParams;
 use crate::events::GuardianReviewFailureReason;
 use crate::events::GuardianReviewTerminalStatus;
 use crate::events::GuardianReviewedAction;
+use crate::events::ReviewResolution;
+use crate::events::ReviewStatus;
+use crate::events::ReviewSubjectKind;
+use crate::events::ReviewTrigger;
+use crate::events::Reviewer;
 use crate::events::ThreadInitializedEvent;
 use crate::events::ThreadInitializedEventParams;
 use crate::events::ToolItemFinalApprovalOutcome;
@@ -67,17 +74,28 @@ use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::CodexErrorInfo;
 use codex_app_server_protocol::CommandAction;
+use codex_app_server_protocol::CommandExecutionApprovalDecision;
+use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
+use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
 use codex_app_server_protocol::CommandExecutionSource;
 use codex_app_server_protocol::CommandExecutionStatus;
+use codex_app_server_protocol::GuardianApprovalReview;
+use codex_app_server_protocol::GuardianApprovalReviewAction;
+use codex_app_server_protocol::GuardianApprovalReviewStatus;
+use codex_app_server_protocol::GuardianCommandSource as AppServerGuardianCommandSource;
 use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::ItemCompletedNotification;
+use codex_app_server_protocol::ItemGuardianApprovalReviewCompletedNotification;
+use codex_app_server_protocol::ItemGuardianApprovalReviewStartedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::NonSteerableTurnKind;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxPolicy as AppServerSandboxPolicy;
 use codex_app_server_protocol::ServerNotification;
+use codex_app_server_protocol::ServerRequest;
+use codex_app_server_protocol::ServerResponse;
 use codex_app_server_protocol::SessionSource as AppServerSessionSource;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadArchiveParams;
@@ -687,6 +705,93 @@ fn sample_command_execution_item_with_actions(
     item
 }
 
+fn sample_command_approval_request(request_id: i64, approval_id: Option<&str>) -> ServerRequest {
+    ServerRequest::CommandExecutionRequestApproval {
+        request_id: RequestId::Integer(request_id),
+        params: CommandExecutionRequestApprovalParams {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item_id: "item-1".to_string(),
+            started_at_ms: 1_000,
+            approval_id: approval_id.map(str::to_string),
+            reason: None,
+            network_approval_context: None,
+            command: Some("echo hi".to_string()),
+            cwd: None,
+            command_actions: None,
+            additional_permissions: None,
+            proposed_execpolicy_amendment: None,
+            proposed_network_policy_amendments: None,
+            available_decisions: None,
+        },
+    }
+}
+
+fn sample_command_approval_response(
+    request_id: i64,
+    decision: CommandExecutionApprovalDecision,
+) -> ServerResponse {
+    ServerResponse::CommandExecutionRequestApproval {
+        request_id: RequestId::Integer(request_id),
+        response: CommandExecutionRequestApprovalResponse { decision },
+    }
+}
+
+fn sample_guardian_review_started(
+    review_id: &str,
+    target_item_id: Option<&str>,
+) -> ServerNotification {
+    ServerNotification::ItemGuardianApprovalReviewStarted(
+        ItemGuardianApprovalReviewStartedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            started_at_ms: 1_000,
+            review_id: review_id.to_string(),
+            target_item_id: target_item_id.map(str::to_string),
+            review: GuardianApprovalReview {
+                status: GuardianApprovalReviewStatus::InProgress,
+                risk_level: None,
+                user_authorization: None,
+                rationale: None,
+            },
+            action: GuardianApprovalReviewAction::Command {
+                source: AppServerGuardianCommandSource::Shell,
+                command: "echo hi".to_string(),
+                cwd: test_path_buf("/tmp").abs(),
+            },
+        },
+    )
+}
+
+fn sample_guardian_review_completed(
+    review_id: &str,
+    target_item_id: Option<&str>,
+    status: GuardianApprovalReviewStatus,
+) -> ServerNotification {
+    ServerNotification::ItemGuardianApprovalReviewCompleted(
+        ItemGuardianApprovalReviewCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            started_at_ms: 1_000,
+            completed_at_ms: 1_042,
+            review_id: review_id.to_string(),
+            target_item_id: target_item_id.map(str::to_string),
+            decision_source: codex_app_server_protocol::AutoReviewDecisionSource::Agent,
+            review: GuardianApprovalReview {
+                status,
+                risk_level: None,
+                user_authorization: None,
+                rationale: None,
+            },
+            action: GuardianApprovalReviewAction::Command {
+                source: AppServerGuardianCommandSource::Shell,
+                command: "echo hi".to_string(),
+                cwd: test_path_buf("/tmp").abs(),
+            },
+        },
+    )
+}
+
 fn expected_absolute_path(path: &PathBuf) -> String {
     std::fs::canonicalize(path)
         .unwrap_or_else(|_| path.to_path_buf())
@@ -1089,6 +1194,82 @@ fn command_execution_event_serializes_expected_shape() {
     );
 }
 
+#[test]
+fn tool_call_review_event_serializes_expected_shape() {
+    let event = TrackEventRequest::ReviewEvent(CodexReviewEventRequest {
+        event_type: "codex_review_event",
+        event_params: CodexReviewEventParams {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item_id: None,
+            review_id: "review-1".to_string(),
+            app_server_client: CodexAppServerClientMetadata {
+                product_client_id: "codex_tui".to_string(),
+                client_name: Some("codex-tui".to_string()),
+                client_version: Some("1.2.3".to_string()),
+                rpc_transport: AppServerRpcTransport::Websocket,
+                experimental_api_enabled: Some(true),
+            },
+            runtime: CodexRuntimeMetadata {
+                codex_rs_version: "0.99.0".to_string(),
+                runtime_os: "macos".to_string(),
+                runtime_os_version: "15.3.1".to_string(),
+                runtime_arch: "aarch64".to_string(),
+            },
+            thread_source: Some(ThreadSource::Subagent),
+            subagent_source: Some("thread_spawn".to_string()),
+            parent_thread_id: Some("parent-thread-1".to_string()),
+            tool_kind: ReviewSubjectKind::NetworkAccess,
+            tool_name: "network_access".to_string(),
+            reviewer: Reviewer::User,
+            trigger: ReviewTrigger::NetworkPolicyDenial,
+            status: ReviewStatus::Approved,
+            resolution: ReviewResolution::NetworkPolicyAmendment,
+            started_at_ms: 123,
+            completed_at_ms: 125,
+            duration_ms: Some(2),
+        },
+    });
+
+    let payload = serde_json::to_value(&event).expect("serialize tool review event");
+    assert_eq!(
+        payload,
+        json!({
+            "event_type": "codex_review_event",
+            "event_params": {
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "item_id": null,
+                "review_id": "review-1",
+                "app_server_client": {
+                    "product_client_id": "codex_tui",
+                    "client_name": "codex-tui",
+                    "client_version": "1.2.3",
+                    "rpc_transport": "websocket",
+                    "experimental_api_enabled": true
+                },
+                "runtime": {
+                    "codex_rs_version": "0.99.0",
+                    "runtime_os": "macos",
+                    "runtime_os_version": "15.3.1",
+                    "runtime_arch": "aarch64"
+                },
+                "thread_source": "subagent",
+                "subagent_source": "thread_spawn",
+                "parent_thread_id": "parent-thread-1",
+                "tool_kind": "network_access",
+                "tool_name": "network_access",
+                "reviewer": "user",
+                "trigger": "network_policy_denial",
+                "status": "approved",
+                "resolution": "network_policy_amendment",
+                "started_at_ms": 123,
+                "completed_at_ms": 125,
+                "duration_ms": 2
+            }
+        })
+    );
+}
 #[tokio::test]
 async fn initialize_caches_client_and_thread_lifecycle_publishes_once_initialized() {
     let mut reducer = AnalyticsReducer::default();
@@ -1601,6 +1782,196 @@ async fn item_lifecycle_notifications_publish_command_execution_event() {
         "codex-tui"
     );
     assert_eq!(payload[0]["event_params"]["thread_source"], "user");
+}
+
+#[tokio::test]
+async fn command_execution_approval_response_publishes_user_review_event() {
+    let mut reducer = AnalyticsReducer::default();
+    let mut events = Vec::new();
+
+    ingest_tool_review_prerequisites(&mut reducer, &mut events).await;
+    reducer
+        .ingest(
+            AnalyticsFact::ServerRequest {
+                connection_id: 7,
+                request: Box::new(sample_command_approval_request(
+                    /*request_id*/ 41, /*approval_id*/ None,
+                )),
+            },
+            &mut events,
+        )
+        .await;
+    assert!(events.is_empty());
+
+    reducer
+        .ingest(
+            AnalyticsFact::ServerResponse {
+                completed_at_ms: 1_042,
+                response: Box::new(sample_command_approval_response(
+                    /*request_id*/ 41,
+                    CommandExecutionApprovalDecision::Accept,
+                )),
+            },
+            &mut events,
+        )
+        .await;
+
+    let payload = serde_json::to_value(&events).expect("serialize events");
+    assert_eq!(payload.as_array().expect("events array").len(), 1);
+    assert_eq!(payload[0]["event_type"], "codex_review_event");
+    assert_eq!(payload[0]["event_params"]["thread_id"], "thread-1");
+    assert_eq!(payload[0]["event_params"]["turn_id"], "turn-1");
+    assert_eq!(payload[0]["event_params"]["item_id"], "item-1");
+    assert_eq!(payload[0]["event_params"]["review_id"], "user:41");
+    assert_eq!(payload[0]["event_params"]["thread_source"], "user");
+    assert_eq!(payload[0]["event_params"]["tool_kind"], "command_execution");
+    assert_eq!(payload[0]["event_params"]["tool_name"], "shell");
+    assert_eq!(payload[0]["event_params"]["reviewer"], "user");
+    assert_eq!(payload[0]["event_params"]["trigger"], "initial");
+    assert_eq!(payload[0]["event_params"]["status"], "approved");
+    assert_eq!(payload[0]["event_params"]["started_at_ms"], 1_000);
+    assert_eq!(payload[0]["event_params"]["completed_at_ms"], 1_042);
+    assert_eq!(payload[0]["event_params"]["duration_ms"], 42);
+}
+
+#[tokio::test]
+async fn guardian_completed_notification_publishes_review_event_with_thread_metadata() {
+    let mut reducer = AnalyticsReducer::default();
+    let mut events = Vec::new();
+
+    ingest_tool_review_prerequisites(&mut reducer, &mut events).await;
+    reducer
+        .ingest(
+            AnalyticsFact::Notification(Box::new(sample_guardian_review_started(
+                "guardian-review-1",
+                Some("item-1"),
+            ))),
+            &mut events,
+        )
+        .await;
+    reducer
+        .ingest(
+            AnalyticsFact::Notification(Box::new(sample_guardian_review_completed(
+                "guardian-review-1",
+                Some("item-1"),
+                GuardianApprovalReviewStatus::Denied,
+            ))),
+            &mut events,
+        )
+        .await;
+
+    let payload = serde_json::to_value(&events[0]).expect("serialize review event");
+    assert_eq!(payload["event_type"], "codex_review_event");
+    assert_eq!(payload["event_params"]["review_id"], "guardian-review-1");
+    assert_eq!(payload["event_params"]["item_id"], "item-1");
+    assert_eq!(payload["event_params"]["thread_source"], "user");
+    assert_eq!(payload["event_params"]["tool_kind"], "command_execution");
+    assert_eq!(payload["event_params"]["reviewer"], "guardian");
+    assert_eq!(payload["event_params"]["status"], "denied");
+    assert_eq!(payload["event_params"]["started_at_ms"], 1_000);
+    assert_eq!(payload["event_params"]["completed_at_ms"], 1_042);
+    assert_eq!(payload["event_params"]["duration_ms"], 42);
+}
+
+#[tokio::test]
+async fn guardian_completed_without_started_uses_notification_timing() {
+    let mut reducer = AnalyticsReducer::default();
+    let mut events = Vec::new();
+
+    ingest_tool_review_prerequisites(&mut reducer, &mut events).await;
+    reducer
+        .ingest(
+            AnalyticsFact::Notification(Box::new(sample_guardian_review_completed(
+                "guardian-review-2",
+                /*target_item_id*/ None,
+                GuardianApprovalReviewStatus::TimedOut,
+            ))),
+            &mut events,
+        )
+        .await;
+
+    let payload = serde_json::to_value(&events[0]).expect("serialize review event");
+    assert_eq!(payload["event_params"]["item_id"], json!(null));
+    assert_eq!(payload["event_params"]["status"], "timed_out");
+    assert_eq!(payload["event_params"]["started_at_ms"], 1_000);
+    assert_eq!(payload["event_params"]["completed_at_ms"], 1_042);
+    assert_eq!(payload["event_params"]["duration_ms"], 42);
+}
+
+#[tokio::test]
+async fn terminal_reviews_denormalize_counts_onto_tool_item_events() {
+    let mut reducer = AnalyticsReducer::default();
+    let mut events = Vec::new();
+
+    ingest_tool_review_prerequisites(&mut reducer, &mut events).await;
+    reducer
+        .ingest(
+            AnalyticsFact::ServerRequest {
+                connection_id: 7,
+                request: Box::new(sample_command_approval_request(
+                    /*request_id*/ 71, /*approval_id*/ None,
+                )),
+            },
+            &mut events,
+        )
+        .await;
+    reducer
+        .ingest(
+            AnalyticsFact::ServerResponse {
+                completed_at_ms: 1_042,
+                response: Box::new(sample_command_approval_response(
+                    /*request_id*/ 71,
+                    CommandExecutionApprovalDecision::AcceptForSession,
+                )),
+            },
+            &mut events,
+        )
+        .await;
+    events.clear();
+
+    reducer
+        .ingest(
+            AnalyticsFact::Notification(Box::new(ServerNotification::ItemStarted(
+                ItemStartedNotification {
+                    thread_id: "thread-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    started_at_ms: 1_000,
+                    item: sample_command_execution_item(
+                        CommandExecutionStatus::InProgress,
+                        /*exit_code*/ None,
+                        /*duration_ms*/ None,
+                    ),
+                },
+            ))),
+            &mut events,
+        )
+        .await;
+    reducer
+        .ingest(
+            AnalyticsFact::Notification(Box::new(ServerNotification::ItemCompleted(
+                ItemCompletedNotification {
+                    thread_id: "thread-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    completed_at_ms: 1_042,
+                    item: sample_command_execution_item(
+                        CommandExecutionStatus::Completed,
+                        Some(0),
+                        Some(42),
+                    ),
+                },
+            ))),
+            &mut events,
+        )
+        .await;
+
+    let payload = serde_json::to_value(&events[0]).expect("serialize tool item event");
+    assert_eq!(payload["event_params"]["review_count"], 1);
+    assert_eq!(payload["event_params"]["user_review_count"], 1);
+    assert_eq!(payload["event_params"]["guardian_review_count"], 0);
+    assert_eq!(
+        payload["event_params"]["final_approval_outcome"],
+        "user_approved_for_session"
+    );
 }
 
 #[test]
