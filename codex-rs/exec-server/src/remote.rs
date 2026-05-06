@@ -1,16 +1,11 @@
-use std::collections::BTreeMap;
 use std::env;
 use std::time::Duration;
 
 use reqwest::StatusCode;
 use serde::Deserialize;
-use serde::Serialize;
-use serde_json::Value;
-use sha2::Digest as _;
 use tokio::time::sleep;
 use tokio_tungstenite::connect_async;
 use tracing::warn;
-use uuid::Uuid;
 
 use crate::ExecServerError;
 use crate::ExecServerRuntimePaths;
@@ -20,11 +15,10 @@ use crate::server::ConnectionProcessor;
 pub const CODEX_EXEC_SERVER_REMOTE_BEARER_TOKEN_ENV_VAR: &str =
     "CODEX_EXEC_SERVER_REMOTE_BEARER_TOKEN";
 
-const PROTOCOL_VERSION: &str = "codex-exec-server-v1";
 const ERROR_BODY_PREVIEW_BYTES: usize = 4096;
 
 #[derive(Clone)]
-struct ExecutorRegistryClient {
+pub(crate) struct ExecutorRegistryClient {
     base_url: String,
     bearer_token: String,
     http: reqwest::Client,
@@ -40,7 +34,7 @@ impl std::fmt::Debug for ExecutorRegistryClient {
 }
 
 impl ExecutorRegistryClient {
-    fn new(base_url: String, bearer_token: String) -> Result<Self, ExecServerError> {
+    pub(crate) fn new(base_url: String, bearer_token: String) -> Result<Self, ExecServerError> {
         let base_url = normalize_base_url(base_url)?;
         Ok(Self {
             base_url,
@@ -49,30 +43,29 @@ impl ExecutorRegistryClient {
         })
     }
 
-    async fn register_executor(
+    pub(crate) async fn register_executor(
         &self,
-        request: &ExecutorRegistryRegisterExecutorRequest,
+        executor_id: &str,
     ) -> Result<ExecutorRegistryExecutorRegistrationResponse, ExecServerError> {
-        self.post_json(
-            &format!("/cloud/executor/{}/register", request.executor_id),
-            request,
-        )
-        .await
-    }
-
-    async fn post_json<T, R>(&self, path: &str, request: &T) -> Result<R, ExecServerError>
-    where
-        T: Serialize + Sync,
-        R: for<'de> Deserialize<'de>,
-    {
         let response = self
             .http
-            .post(endpoint_url(&self.base_url, path))
+            .post(endpoint_url(
+                &self.base_url,
+                &format!("/cloud/executor/{executor_id}/register"),
+            ))
             .bearer_auth(&self.bearer_token)
-            .json(request)
             .send()
             .await?;
+        self.parse_json_response(response).await
+    }
 
+    async fn parse_json_response<R>(
+        &self,
+        response: reqwest::Response,
+    ) -> Result<R, ExecServerError>
+    where
+        R: for<'de> Deserialize<'de>,
+    {
         if response.status().is_success() {
             return response.json::<R>().await.map_err(ExecServerError::from);
         }
@@ -87,21 +80,10 @@ impl ExecutorRegistryClient {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
-struct ExecutorRegistryRegisterExecutorRequest {
-    idempotency_id: String,
-    executor_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    labels: BTreeMap<String, String>,
-    metadata: Value,
-}
-
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
-struct ExecutorRegistryExecutorRegistrationResponse {
-    id: String,
-    executor_id: String,
-    url: String,
+pub(crate) struct ExecutorRegistryExecutorRegistrationResponse {
+    pub(crate) executor_id: String,
+    pub(crate) url: String,
 }
 
 /// Configuration for registering an exec-server for remote use.
@@ -135,39 +117,14 @@ impl RemoteExecutorConfig {
         bearer_token: String,
     ) -> Result<Self, ExecServerError> {
         let executor_id = normalize_executor_id(executor_id)?;
-        let bearer_token = normalize_bearer_token(bearer_token)?;
+        let bearer_token =
+            normalize_bearer_token(bearer_token, CODEX_EXEC_SERVER_REMOTE_BEARER_TOKEN_ENV_VAR)?;
         Ok(Self {
             base_url,
             executor_id,
             name: "codex-exec-server".to_string(),
             bearer_token,
         })
-    }
-
-    fn registration_request(
-        &self,
-        registration_id: Uuid,
-    ) -> ExecutorRegistryRegisterExecutorRequest {
-        ExecutorRegistryRegisterExecutorRequest {
-            idempotency_id: self.default_idempotency_id(registration_id),
-            executor_id: self.executor_id.clone(),
-            name: Some(self.name.clone()),
-            labels: BTreeMap::new(),
-            metadata: Value::Object(Default::default()),
-        }
-    }
-
-    fn default_idempotency_id(&self, registration_id: Uuid) -> String {
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(self.executor_id.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(self.name.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(PROTOCOL_VERSION);
-        hasher.update(b"\0");
-        hasher.update(registration_id.as_bytes());
-        let digest = hasher.finalize();
-        format!("codex-exec-server-{digest:x}")
     }
 }
 
@@ -179,15 +136,13 @@ pub async fn run_remote_executor(
 ) -> Result<(), ExecServerError> {
     let client = ExecutorRegistryClient::new(config.base_url.clone(), config.bearer_token.clone())?;
     let processor = ConnectionProcessor::new(runtime_paths);
-    let registration_id = Uuid::new_v4();
     let mut backoff = Duration::from_secs(1);
 
     loop {
-        let request = config.registration_request(registration_id);
-        let response = client.register_executor(&request).await?;
+        let response = client.register_executor(&config.executor_id).await?;
         eprintln!(
-            "codex exec-server remote executor {} registered with executor_id {}",
-            response.id, response.executor_id
+            "codex exec-server remote executor registered with executor_id {}",
+            response.executor_id
         );
 
         match connect_async(response.url.as_str()).await {
@@ -211,26 +166,28 @@ pub async fn run_remote_executor(
 }
 
 fn read_remote_bearer_token_from_env() -> Result<String, ExecServerError> {
-    read_remote_bearer_token_from_env_with(|name| env::var(name))
+    read_bearer_token_from_env_var(CODEX_EXEC_SERVER_REMOTE_BEARER_TOKEN_ENV_VAR)
 }
 
-fn read_remote_bearer_token_from_env_with<F>(get_var: F) -> Result<String, ExecServerError>
-where
-    F: FnOnce(&str) -> Result<String, env::VarError>,
-{
-    let bearer_token = get_var(CODEX_EXEC_SERVER_REMOTE_BEARER_TOKEN_ENV_VAR).map_err(|_| {
+pub(crate) fn read_bearer_token_from_env_var(
+    env_var_name: &str,
+) -> Result<String, ExecServerError> {
+    let bearer_token = env::var(env_var_name).map_err(|_| {
         ExecServerError::ExecutorRegistryAuth(format!(
-            "executor registry bearer token environment variable `{CODEX_EXEC_SERVER_REMOTE_BEARER_TOKEN_ENV_VAR}` is not set"
+            "executor registry bearer token environment variable `{env_var_name}` is not set"
         ))
     })?;
-    normalize_bearer_token(bearer_token)
+    normalize_bearer_token(bearer_token, env_var_name)
 }
 
-fn normalize_bearer_token(bearer_token: String) -> Result<String, ExecServerError> {
+fn normalize_bearer_token(
+    bearer_token: String,
+    env_var_name: &str,
+) -> Result<String, ExecServerError> {
     let bearer_token = bearer_token.trim().to_string();
     if bearer_token.is_empty() {
         return Err(ExecServerError::ExecutorRegistryAuth(format!(
-            "executor registry bearer token environment variable `{CODEX_EXEC_SERVER_REMOTE_BEARER_TOKEN_ENV_VAR}` is empty"
+            "executor registry bearer token environment variable `{env_var_name}` is empty"
         )));
     }
     Ok(bearer_token)
@@ -323,11 +280,9 @@ fn preview_error_body(body: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
-    use serde_json::json;
     use wiremock::Mock;
     use wiremock::MockServer;
     use wiremock::ResponseTemplate;
-    use wiremock::matchers::body_json;
     use wiremock::matchers::header;
     use wiremock::matchers::method;
     use wiremock::matchers::path;
@@ -337,21 +292,16 @@ mod tests {
     #[tokio::test]
     async fn register_executor_posts_with_bearer_token_header() {
         let server = MockServer::start().await;
-        let registration_id = Uuid::from_u128(1);
         let config = RemoteExecutorConfig::with_bearer_token(
             server.uri(),
             "exec-requested".to_string(),
             "registry-token".to_string(),
         )
         .expect("config");
-        let request = config.registration_request(registration_id);
-        let expected_request = serde_json::to_value(&request).expect("serialize request");
         Mock::given(method("POST"))
             .and(path("/cloud/executor/exec-requested/register"))
             .and(header("authorization", "Bearer registry-token"))
-            .and(body_json(expected_request))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "id": "registration-1",
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "executor_id": "exec-1",
                 "url": "wss://rendezvous.test/executor/exec-1?role=executor&sig=abc"
             })))
@@ -361,14 +311,13 @@ mod tests {
             .expect("client");
 
         let response = client
-            .register_executor(&request)
+            .register_executor(&config.executor_id)
             .await
             .expect("register executor");
 
         assert_eq!(
             response,
             ExecutorRegistryExecutorRegistrationResponse {
-                id: "registration-1".to_string(),
                 executor_id: "exec-1".to_string(),
                 url: "wss://rendezvous.test/executor/exec-1?role=executor&sig=abc".to_string(),
             }

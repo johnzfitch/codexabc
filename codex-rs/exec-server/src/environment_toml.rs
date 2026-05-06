@@ -17,6 +17,9 @@ use crate::client_api::StdioExecServerCommand;
 use crate::environment::LOCAL_ENVIRONMENT_ID;
 use crate::environment_provider::EnvironmentDefault;
 use crate::environment_provider::EnvironmentProviderSnapshot;
+use crate::remote::CODEX_EXEC_SERVER_REMOTE_BEARER_TOKEN_ENV_VAR;
+use crate::remote::ExecutorRegistryClient;
+use crate::remote::read_bearer_token_from_env_var;
 
 const ENVIRONMENTS_TOML_FILE: &str = "environments.toml";
 const MAX_ENVIRONMENT_ID_LEN: usize = 64;
@@ -28,6 +31,8 @@ struct EnvironmentsToml {
 
     #[serde(default)]
     environments: Vec<EnvironmentToml>,
+
+    cloud: Option<CloudProviderToml>,
 }
 
 #[derive(Deserialize, Debug, Default, PartialEq, Eq)]
@@ -39,6 +44,23 @@ struct EnvironmentToml {
     args: Option<Vec<String>>,
     env: Option<HashMap<String, String>>,
     cwd: Option<PathBuf>,
+}
+
+#[derive(Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
+struct CloudProviderToml {
+    base_url: String,
+    bearer_token_env: Option<String>,
+
+    #[serde(default)]
+    environments: Vec<CloudEnvironmentToml>,
+}
+
+#[derive(Clone, Deserialize, Debug, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CloudEnvironmentToml {
+    id: String,
+    executor_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,6 +116,82 @@ impl EnvironmentProvider for TomlEnvironmentProvider {
                     transport_params.clone(),
                     Some(local_runtime_paths.clone()),
                 ),
+            );
+        }
+
+        Ok(EnvironmentProviderSnapshot {
+            environments,
+            default: self.default.clone(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CloudEnvironmentProvider {
+    default: EnvironmentDefault,
+    base_url: String,
+    bearer_token_env: String,
+    environments: Vec<CloudEnvironmentToml>,
+}
+
+impl CloudEnvironmentProvider {
+    fn new(config: CloudProviderToml, default: Option<String>) -> Result<Self, ExecServerError> {
+        let CloudProviderToml {
+            base_url,
+            bearer_token_env,
+            environments,
+        } = config;
+        let mut ids = HashSet::from([LOCAL_ENVIRONMENT_ID.to_string()]);
+        let mut cloud_environments = Vec::with_capacity(environments.len());
+        for item in environments {
+            validate_environment_id(&item.id)?;
+            if !ids.insert(item.id.clone()) {
+                return Err(ExecServerError::Protocol(format!(
+                    "environment id `{}` is duplicated",
+                    item.id
+                )));
+            }
+            cloud_environments.push(CloudEnvironmentToml {
+                id: item.id,
+                executor_id: validate_cloud_executor_id(&item.id, item.executor_id)?,
+            });
+        }
+
+        let bearer_token_env = bearer_token_env
+            .unwrap_or_else(|| CODEX_EXEC_SERVER_REMOTE_BEARER_TOKEN_ENV_VAR.to_string());
+        if bearer_token_env.trim().is_empty() {
+            return Err(ExecServerError::Protocol(
+                "cloud bearer_token_env cannot be empty".to_string(),
+            ));
+        }
+
+        Ok(Self {
+            default: normalize_default_environment_id(default.as_deref(), &ids)?,
+            base_url,
+            bearer_token_env,
+            environments: cloud_environments,
+        })
+    }
+}
+
+#[async_trait]
+impl EnvironmentProvider for CloudEnvironmentProvider {
+    async fn snapshot(
+        &self,
+        local_runtime_paths: &ExecServerRuntimePaths,
+    ) -> Result<EnvironmentProviderSnapshot, ExecServerError> {
+        let bearer_token = read_bearer_token_from_env_var(&self.bearer_token_env)?;
+        let client = ExecutorRegistryClient::new(self.base_url.clone(), bearer_token)?;
+        let mut environments = HashMap::from([(
+            LOCAL_ENVIRONMENT_ID.to_string(),
+            Environment::local(local_runtime_paths.clone()),
+        )]);
+
+        for item in &self.environments {
+            let response = client.register_executor(&item.executor_id).await?;
+            environments.insert(
+                item.id.clone(),
+                Environment::remote_inner(response.url, Some(local_runtime_paths.clone())),
             );
         }
 
@@ -186,10 +284,36 @@ pub(crate) fn environment_provider_from_codex_home(
     }
 
     let environments = load_environments_toml(&path)?;
-    Ok(Box::new(TomlEnvironmentProvider::new_with_config_dir(
+    environment_provider_from_config(environments, Some(codex_home))
+}
+
+fn environment_provider_from_config(
+    config: EnvironmentsToml,
+    config_dir: Option<&Path>,
+) -> Result<Box<dyn EnvironmentProvider>, ExecServerError> {
+    let EnvironmentsToml {
+        default,
         environments,
-        Some(codex_home),
-    )?))
+        cloud,
+    } = config;
+    match cloud {
+        Some(cloud) => {
+            if !environments.is_empty() {
+                return Err(ExecServerError::Protocol(
+                    "cloud provider cannot be combined with explicit environments".to_string(),
+                ));
+            }
+            Ok(Box::new(CloudEnvironmentProvider::new(cloud, default)?))
+        }
+        None => Ok(Box::new(TomlEnvironmentProvider::new_with_config_dir(
+            EnvironmentsToml {
+                default,
+                environments,
+                cloud: None,
+            },
+            config_dir,
+        )?)),
+    }
 }
 
 fn normalize_default_environment_id(
@@ -269,6 +393,16 @@ fn validate_websocket_url(url: String) -> Result<String, ExecServerError> {
     Ok(url.to_string())
 }
 
+fn validate_cloud_executor_id(id: &str, executor_id: String) -> Result<String, ExecServerError> {
+    let executor_id = executor_id.trim().to_string();
+    if executor_id.is_empty() {
+        return Err(ExecServerError::Protocol(format!(
+            "cloud environment `{id}` executor_id cannot be empty"
+        )));
+    }
+    Ok(executor_id)
+}
+
 fn load_environments_toml(path: &Path) -> Result<EnvironmentsToml, ExecServerError> {
     let contents = std::fs::read_to_string(path).map_err(|err| {
         ExecServerError::Protocol(format!(
@@ -288,9 +422,42 @@ fn load_environments_toml(path: &Path) -> Result<EnvironmentsToml, ExecServerErr
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
+    use serial_test::serial;
     use tempfile::tempdir;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::header;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
 
     use super::*;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
 
     fn test_runtime_paths() -> ExecServerRuntimePaths {
         ExecServerRuntimePaths::new(
@@ -333,6 +500,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            ..Default::default()
         })
         .expect("provider");
         let runtime_paths = test_runtime_paths();
@@ -379,6 +547,7 @@ mod tests {
         let provider = TomlEnvironmentProvider::new(EnvironmentsToml {
             default: Some("none".to_string()),
             environments: Vec::new(),
+            ..Default::default()
         })
         .expect("provider");
         let snapshot = provider
@@ -387,6 +556,75 @@ mod tests {
             .expect("environments");
 
         assert_eq!(snapshot.default, EnvironmentDefault::Disabled);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn cloud_provider_fetches_remote_environment_urls() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/cloud/executor/exec-requested/register"))
+            .and(header("authorization", "Bearer registry-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "executor_id": "exec-requested",
+                "url": "wss://rendezvous.test/executor/exec-requested?sig=abc"
+            })))
+            .mount(&server)
+            .await;
+
+        let provider = CloudEnvironmentProvider::new(
+            CloudProviderToml {
+                base_url: server.uri(),
+                bearer_token_env: Some("CODEX_TEST_CLOUD_PROVIDER_TOKEN".to_string()),
+                environments: vec![CloudEnvironmentToml {
+                    id: "cloud-dev".to_string(),
+                    executor_id: "exec-requested".to_string(),
+                }],
+            },
+            Some("cloud-dev".to_string()),
+        )
+        .expect("provider");
+        let _env_guard = EnvVarGuard::set("CODEX_TEST_CLOUD_PROVIDER_TOKEN", "registry-token");
+
+        let snapshot = provider
+            .snapshot(&test_runtime_paths())
+            .await
+            .expect("cloud environments");
+
+        assert_eq!(
+            snapshot.default,
+            EnvironmentDefault::EnvironmentId("cloud-dev".to_string())
+        );
+        assert_eq!(
+            snapshot.environments["cloud-dev"].exec_server_url(),
+            Some("wss://rendezvous.test/executor/exec-requested?sig=abc")
+        );
+    }
+
+    #[test]
+    fn environment_provider_from_config_rejects_mixed_cloud_and_explicit_environments() {
+        let err = environment_provider_from_config(
+            EnvironmentsToml {
+                default: None,
+                environments: vec![EnvironmentToml {
+                    id: "devbox".to_string(),
+                    url: Some("ws://127.0.0.1:8765".to_string()),
+                    ..Default::default()
+                }],
+                cloud: Some(CloudProviderToml {
+                    base_url: "https://registry.example".to_string(),
+                    bearer_token_env: None,
+                    environments: Vec::new(),
+                }),
+            },
+            /*config_dir*/ None,
+        )
+        .expect_err("mixed provider config should fail");
+
+        assert_eq!(
+            err.to_string(),
+            "exec-server protocol error: cloud provider cannot be combined with explicit environments"
+        );
     }
 
     #[test]
@@ -455,6 +693,7 @@ mod tests {
             let err = TomlEnvironmentProvider::new(EnvironmentsToml {
                 default: None,
                 environments: vec![item],
+                ..Default::default()
             })
             .expect_err("invalid item should fail");
 
@@ -477,6 +716,7 @@ mod tests {
                     cwd: Some(PathBuf::from("workspace")),
                     ..Default::default()
                 }],
+                ..Default::default()
             },
             Some(config_dir.path()),
         )
@@ -503,6 +743,7 @@ mod tests {
                 cwd: Some(PathBuf::from("workspace")),
                 ..Default::default()
             }],
+            ..Default::default()
         })
         .expect_err("relative cwd without config dir should fail");
 
@@ -528,6 +769,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            ..Default::default()
         })
         .expect_err("duplicate id should fail");
 
@@ -547,6 +789,7 @@ mod tests {
                 url: Some("ws://127.0.0.1:8765".to_string()),
                 ..Default::default()
             }],
+            ..Default::default()
         })
         .expect_err("overlong id should fail");
 
@@ -563,6 +806,7 @@ mod tests {
         let err = TomlEnvironmentProvider::new(EnvironmentsToml {
             default: Some("missing".to_string()),
             environments: Vec::new(),
+            ..Default::default()
         })
         .expect_err("unknown default should fail");
 
@@ -650,6 +894,44 @@ unknown = true
     }
 
     #[test]
+    fn load_environments_toml_reads_cloud_provider_config() {
+        let codex_home = tempdir().expect("tempdir");
+        let path = codex_home.path().join(ENVIRONMENTS_TOML_FILE);
+        std::fs::write(
+            &path,
+            r#"
+default = "cloud-dev"
+
+[cloud]
+base_url = "https://registry.example"
+bearer_token_env = "CODEX_TEST_CLOUD_PROVIDER_TOKEN"
+
+[[cloud.environments]]
+id = "cloud-dev"
+executor_id = "exec-requested"
+"#,
+        )
+        .expect("write environments.toml");
+
+        let environments = load_environments_toml(&path).expect("environments.toml");
+
+        assert_eq!(environments.default.as_deref(), Some("cloud-dev"));
+        let cloud = environments.cloud.expect("cloud config");
+        assert_eq!(cloud.base_url, "https://registry.example");
+        assert_eq!(
+            cloud.bearer_token_env.as_deref(),
+            Some("CODEX_TEST_CLOUD_PROVIDER_TOKEN")
+        );
+        assert_eq!(
+            cloud.environments,
+            vec![CloudEnvironmentToml {
+                id: "cloud-dev".to_string(),
+                executor_id: "exec-requested".to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn toml_provider_rejects_malformed_websocket_url() {
         let err = TomlEnvironmentProvider::new(EnvironmentsToml {
             default: None,
@@ -658,6 +940,7 @@ unknown = true
                 url: Some("ws://".to_string()),
                 ..Default::default()
             }],
+            ..Default::default()
         })
         .expect_err("malformed websocket url should fail");
 
