@@ -26,9 +26,7 @@ pub(crate) enum JsonRpcConnectionEvent {
 
 pub(crate) enum JsonRpcTransport {
     Plain,
-    Stdio {
-        _transport: Box<StdioTransport>,
-    },
+    Stdio { _transport: Box<StdioTransport> },
 }
 
 impl JsonRpcTransport {
