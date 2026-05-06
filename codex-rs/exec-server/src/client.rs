@@ -961,10 +961,11 @@ mod tests {
     async fn connect_stdio_command_initializes_json_rpc_client_on_windows() {
         let client = ExecServerClient::connect_stdio_command(StdioExecServerConnectArgs {
             command: StdioExecServerCommand {
-                program: "cmd".to_string(),
+                program: "powershell".to_string(),
                 args: vec![
-                    "/C".to_string(),
-                    "set /p _line= & echo {^\"id^\":1,^\"result^\":{^\"sessionId^\":^\"stdio-test^\"}} & set /p _line= & ping -n 60 127.0.0.1 >nul".to_string(),
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    "$null = [Console]::In.ReadLine(); [Console]::Out.WriteLine('{\"id\":1,\"result\":{\"sessionId\":\"stdio-test\"}}'); $null = [Console]::In.ReadLine(); Start-Sleep -Seconds 60".to_string(),
                 ],
                 env: HashMap::new(),
                 cwd: None,
