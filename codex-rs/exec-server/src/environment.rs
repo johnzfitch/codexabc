@@ -302,7 +302,7 @@ impl Environment {
     }
 
     /// Returns the remote exec-server URL when this environment is remote.
-    pub fn exec_server_url(&self) -> Option<&str> {
+    pub(crate) fn exec_server_url(&self) -> Option<&str> {
         match self.remote_transport.as_ref() {
             Some(ExecServerTransportParams::WebSocketUrl(url)) => Some(url.as_str()),
             Some(ExecServerTransportParams::StdioCommand(_)) | None => None,
