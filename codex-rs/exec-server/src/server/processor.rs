@@ -49,8 +49,8 @@ async fn run_connection(
     let router = Arc::new(build_router());
     let JsonRpcConnection {
         outgoing_tx: json_outgoing_tx,
-        incoming_rx: mut incoming_rx,
-        disconnected_rx: mut disconnected_rx,
+        mut incoming_rx,
+        mut disconnected_rx,
         task_handles: connection_tasks,
         transport: _transport,
     } = connection;

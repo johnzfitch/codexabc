@@ -26,14 +26,16 @@ pub(crate) enum JsonRpcConnectionEvent {
 
 pub(crate) enum JsonRpcTransport {
     Plain,
-    Stdio(StdioTransport),
+    Stdio { _transport: StdioTransport },
 }
 
 impl JsonRpcTransport {
     fn from_child_process(child_process: Child) -> Self {
-        Self::Stdio(StdioTransport {
-            child_process: Some(child_process),
-        })
+        Self::Stdio {
+            _transport: StdioTransport {
+                child_process: Some(child_process),
+            },
+        }
     }
 }
 

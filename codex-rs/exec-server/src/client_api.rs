@@ -49,6 +49,7 @@ pub(crate) struct StdioExecServerCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExecServerTransportParams {
     WebSocketUrl(String),
+    #[allow(dead_code)]
     StdioCommand(StdioExecServerCommand),
 }
 

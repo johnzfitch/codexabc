@@ -235,7 +235,7 @@ impl RpcClient {
     pub(crate) fn new(connection: JsonRpcConnection) -> (Self, mpsc::Receiver<RpcClientEvent>) {
         let JsonRpcConnection {
             outgoing_tx: write_tx,
-            incoming_rx: mut incoming_rx,
+            mut incoming_rx,
             disconnected_rx,
             task_handles: transport_tasks,
             transport,
