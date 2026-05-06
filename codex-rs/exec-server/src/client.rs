@@ -964,7 +964,7 @@ mod tests {
                 program: "cmd".to_string(),
                 args: vec![
                     "/C".to_string(),
-                    "set /p _line= & echo {\"id\":1,\"result\":{\"sessionId\":\"stdio-test\"}} & set /p _line= & ping -n 60 127.0.0.1 >nul".to_string(),
+                    "set /p _line= & echo {^\"id^\":1,^\"result^\":{^\"sessionId^\":^\"stdio-test^\"}} & set /p _line= & ping -n 60 127.0.0.1 >nul".to_string(),
                 ],
                 env: HashMap::new(),
                 cwd: None,
