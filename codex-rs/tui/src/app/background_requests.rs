@@ -5,6 +5,11 @@
 //! the main event loop remains single-threaded.
 
 use super::*;
+use base64::Engine;
+use codex_app_server_protocol::FsCreateUploadParams;
+use codex_app_server_protocol::FsCreateUploadResponse;
+use codex_app_server_protocol::FsWriteFileParams;
+use codex_app_server_protocol::FsWriteFileResponse;
 use codex_app_server_protocol::HookTrustStatus;
 use codex_app_server_protocol::MarketplaceAddParams;
 use codex_app_server_protocol::MarketplaceAddResponse;
@@ -16,6 +21,16 @@ use codex_app_server_protocol::MarketplaceUpgradeResponse;
 use codex_app_server_protocol::RequestId;
 
 use codex_utils_absolute_path::AbsolutePathBuf;
+use serde::Deserialize;
+use tokio::io::AsyncReadExt;
+
+const MAX_UPLOAD_FILE_BYTES: u64 = 45 * 1024 * 1024;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteFsCreateUploadResponse {
+    path: String,
+}
 
 impl App {
     pub(super) fn fetch_mcp_inventory(
@@ -138,6 +153,17 @@ impl App {
                 .await
                 .map_err(|err| err.to_string());
             app_event_tx.send(AppEvent::PluginsLoaded { cwd, result });
+        });
+    }
+
+    pub(super) fn upload_local_file(&mut self, app_server: &AppServerSession, local_path: PathBuf) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = upload_local_file_request(request_handle, &local_path)
+                .await
+                .map_err(|err| err.to_string());
+            app_event_tx.send(AppEvent::LocalFileUploaded { local_path, result });
         });
     }
 
@@ -604,6 +630,74 @@ pub(super) async fn fetch_all_mcp_server_statuses(
     Ok(statuses)
 }
 
+pub(super) async fn upload_local_file_request(
+    request_handle: AppServerRequestHandle,
+    local_path: &Path,
+) -> Result<PathBuf> {
+    let file_name = local_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| color_eyre::eyre::eyre!("Upload path must name a file."))?
+        .to_string();
+    let metadata = tokio::fs::metadata(local_path).await?;
+    if !metadata.is_file() {
+        color_eyre::eyre::bail!("Upload path must name a regular file.");
+    }
+    ensure_upload_file_size(metadata.len())?;
+    let file = tokio::fs::File::open(local_path).await?;
+    let mut bytes = Vec::new();
+    file.take(MAX_UPLOAD_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await?;
+    ensure_upload_file_size(bytes.len() as u64)?;
+    match &request_handle {
+        AppServerRequestHandle::Remote(_) => {
+            let request_id = RequestId::String(format!("upload-local-file-{}", Uuid::new_v4()));
+            let response: RemoteFsCreateUploadResponse = request_handle
+                .request_typed(ClientRequest::FsCreateUpload {
+                    request_id,
+                    params: FsCreateUploadParams { file_name },
+                })
+                .await
+                .wrap_err("fs/createUpload failed in TUI")?;
+            request_handle
+                .upload_file_over_sftp(&response.path, &bytes)
+                .await
+                .wrap_err("staged upload stream failed in TUI")?;
+            Ok(PathBuf::from(response.path))
+        }
+        AppServerRequestHandle::InProcess(_) => {
+            let request_id = RequestId::String(format!("upload-local-file-{}", Uuid::new_v4()));
+            let response: FsCreateUploadResponse = request_handle
+                .request_typed(ClientRequest::FsCreateUpload {
+                    request_id,
+                    params: FsCreateUploadParams { file_name },
+                })
+                .await
+                .wrap_err("fs/createUpload failed in TUI")?;
+            let request_id = RequestId::String(format!("write-local-upload-{}", Uuid::new_v4()));
+            request_handle
+                .request_typed::<FsWriteFileResponse>(ClientRequest::FsWriteFile {
+                    request_id,
+                    params: FsWriteFileParams {
+                        path: response.path.clone(),
+                        data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    },
+                })
+                .await
+                .wrap_err("fs/writeFile failed for local staged upload in TUI")?;
+            Ok(response.path.into())
+        }
+    }
+}
+
+fn ensure_upload_file_size(file_size: u64) -> Result<()> {
+    if file_size > MAX_UPLOAD_FILE_BYTES {
+        color_eyre::eyre::bail!("Uploads accept files up to {MAX_UPLOAD_FILE_BYTES} bytes.");
+    }
+    Ok(())
+}
+
 pub(super) async fn fetch_account_rate_limits(
     request_handle: AppServerRequestHandle,
 ) -> Result<Vec<RateLimitSnapshot>> {
@@ -1037,6 +1131,17 @@ mod tests {
                 interface: None,
                 plugins: Vec::new(),
             }]
+        );
+    }
+
+    #[test]
+    fn upload_rejects_files_larger_than_the_upload_limit() {
+        let err = ensure_upload_file_size(MAX_UPLOAD_FILE_BYTES + 1)
+            .expect_err("file should exceed upload limit");
+
+        assert_eq!(
+            err.to_string(),
+            format!("Uploads accept files up to {MAX_UPLOAD_FILE_BYTES} bytes.")
         );
     }
 

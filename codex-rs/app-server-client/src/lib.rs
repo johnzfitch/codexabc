@@ -16,6 +16,7 @@
 //! surfaces as channel-full errors rather than unbounded memory growth.
 
 mod remote;
+mod sftp_upload;
 
 use std::error::Error;
 use std::fmt;
@@ -850,6 +851,16 @@ impl AppServerRequestHandle {
             Self::Remote(handle) => handle.request_typed(request).await,
         }
     }
+
+    pub async fn upload_file_over_sftp(&self, path: &str, bytes: &[u8]) -> IoResult<()> {
+        match self {
+            Self::InProcess(_) => Err(IoError::new(
+                ErrorKind::Unsupported,
+                "staged SFTP uploads require a remote app-server connection",
+            )),
+            Self::Remote(handle) => handle.upload_file_over_sftp(path, bytes).await,
+        }
+    }
 }
 
 impl AppServerClient {
@@ -1449,6 +1460,46 @@ mod tests {
             .await
             .expect("typed request should succeed");
         assert_eq!(response.account, None);
+
+        client.shutdown().await.expect("shutdown should complete");
+    }
+
+    #[tokio::test]
+    async fn remote_binary_lane_roundtrip_works() {
+        let websocket_url = start_test_remote_server(|mut websocket| async move {
+            expect_remote_initialize(&mut websocket).await;
+            let frame = websocket
+                .next()
+                .await
+                .expect("binary frame should arrive")
+                .expect("binary frame should decode");
+            let Message::Binary(bytes) = frame else {
+                panic!("expected binary frame");
+            };
+            assert_eq!(bytes.as_ref(), [1, 2, 3]);
+            websocket
+                .send(Message::Binary(vec![4, 5, 6].into()))
+                .await
+                .expect("binary response should send");
+            websocket.close(None).await.expect("close should succeed");
+        })
+        .await;
+        let client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
+            .await
+            .expect("remote client should connect");
+        let handle = client.request_handle();
+
+        handle
+            .send_binary(vec![1, 2, 3])
+            .await
+            .expect("binary request should send");
+        assert_eq!(
+            handle
+                .next_binary()
+                .await
+                .expect("binary response should arrive"),
+            vec![4, 5, 6]
+        );
 
         client.shutdown().await.expect("shutdown should complete");
     }

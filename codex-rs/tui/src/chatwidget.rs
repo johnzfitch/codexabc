@@ -10472,6 +10472,27 @@ impl ChatWidget {
         self.bottom_pane.insert_str(text);
     }
 
+    pub(crate) fn insert_uploaded_file_path(&mut self, path: &Path) {
+        let path = path.to_string_lossy();
+        let queued_message_index = self.queued_user_messages.iter().position(|queued_message| {
+            self.queued_message_accepts_uploaded_file_path(queued_message)
+        });
+        if let Some(queued_message) =
+            queued_message_index.and_then(|index| self.queued_user_messages.get_mut(index))
+        {
+            if !queued_message.user_message.text.is_empty() {
+                queued_message.user_message.text.push(' ');
+            }
+            queued_message.user_message.text.push_str(&path);
+            self.refresh_pending_input_preview();
+            return;
+        }
+        if !self.bottom_pane.composer_text().is_empty() {
+            self.bottom_pane.insert_str(" ");
+        }
+        self.bottom_pane.insert_str(&path);
+    }
+
     /// Replace the composer content with the provided text and reset cursor.
     pub(crate) fn set_composer_text(
         &mut self,

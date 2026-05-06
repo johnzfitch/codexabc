@@ -40,6 +40,7 @@ use futures::SinkExt;
 use futures::StreamExt;
 use serde::de::DeserializeOwned;
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -120,6 +121,13 @@ enum RemoteClientCommand {
         error: JSONRPCErrorError,
         response_tx: oneshot::Sender<IoResult<()>>,
     },
+    SendBinary {
+        bytes: Vec<u8>,
+        response_tx: oneshot::Sender<IoResult<()>>,
+    },
+    NextBinary {
+        response_tx: oneshot::Sender<IoResult<Vec<u8>>>,
+    },
     Shutdown {
         response_tx: oneshot::Sender<IoResult<()>>,
     },
@@ -129,12 +137,14 @@ pub struct RemoteAppServerClient {
     command_tx: mpsc::Sender<RemoteClientCommand>,
     event_rx: mpsc::UnboundedReceiver<AppServerEvent>,
     pending_events: VecDeque<AppServerEvent>,
+    upload_lock: std::sync::Arc<Mutex<()>>,
     worker_handle: tokio::task::JoinHandle<()>,
 }
 
 #[derive(Clone)]
 pub struct RemoteAppServerRequestHandle {
     command_tx: mpsc::Sender<RemoteClientCommand>,
+    upload_lock: std::sync::Arc<Mutex<()>>,
 }
 
 impl RemoteAppServerClient {
@@ -212,6 +222,8 @@ impl RemoteAppServerClient {
         let worker_handle = tokio::spawn(async move {
             let mut pending_requests =
                 HashMap::<RequestId, oneshot::Sender<IoResult<RequestResult>>>::new();
+            let mut pending_binary_packets = VecDeque::<Vec<u8>>::new();
+            let mut pending_binary_waiters = VecDeque::<oneshot::Sender<IoResult<Vec<u8>>>>::new();
             let mut worker_exit_error: Option<(ErrorKind, String)> = None;
             loop {
                 tokio::select! {
@@ -297,6 +309,38 @@ impl RemoteAppServerClient {
                                 )
                                 .await;
                                 let _ = response_tx.send(result);
+                            }
+                            RemoteClientCommand::SendBinary { bytes, response_tx } => {
+                                let result = write_binary_message(
+                                    &mut stream,
+                                    bytes,
+                                    &websocket_url,
+                                )
+                                .await;
+                                let should_exit = result.is_err();
+                                let err_message = result.as_ref().err().map(ToString::to_string);
+                                let _ = response_tx.send(result);
+                                if should_exit {
+                                    let message = format!(
+                                        "remote app server at `{websocket_url}` binary write failed: {}",
+                                        err_message.unwrap_or_else(|| "unknown error".to_string())
+                                    );
+                                    let _ = deliver_event(
+                                        &event_tx,
+                                        AppServerEvent::Disconnected {
+                                            message: message.clone(),
+                                        },
+                                    );
+                                    worker_exit_error = Some((ErrorKind::BrokenPipe, message));
+                                    break;
+                                }
+                            }
+                            RemoteClientCommand::NextBinary { response_tx } => {
+                                if let Some(bytes) = pending_binary_packets.pop_front() {
+                                    let _ = response_tx.send(Ok(bytes));
+                                } else {
+                                    pending_binary_waiters.push_back(response_tx);
+                                }
                             }
                             RemoteClientCommand::Shutdown { response_tx } => {
                                 let close_result = stream.close(None).await.map_err(|err| {
@@ -421,8 +465,15 @@ impl RemoteAppServerClient {
                                 ));
                                 break;
                             }
-                            Some(Ok(Message::Binary(_)))
-                            | Some(Ok(Message::Ping(_)))
+                            Some(Ok(Message::Binary(bytes))) => {
+                                let bytes = bytes.to_vec();
+                                if let Some(response_tx) = pending_binary_waiters.pop_front() {
+                                    let _ = response_tx.send(Ok(bytes));
+                                } else {
+                                    pending_binary_packets.push_back(bytes);
+                                }
+                            }
+                            Some(Ok(Message::Ping(_)))
                             | Some(Ok(Message::Pong(_)))
                             | Some(Ok(Message::Frame(_))) => {}
                             Some(Err(err)) => {
@@ -465,12 +516,16 @@ impl RemoteAppServerClient {
             for (_, response_tx) in pending_requests {
                 let _ = response_tx.send(Err(IoError::new(err_kind, err_message.clone())));
             }
+            for response_tx in pending_binary_waiters {
+                let _ = response_tx.send(Err(IoError::new(err_kind, err_message.clone())));
+            }
         });
 
         Ok(Self {
             command_tx,
             event_rx,
             pending_events: pending_events.into(),
+            upload_lock: std::sync::Arc::new(Mutex::new(())),
             worker_handle,
         })
     }
@@ -478,6 +533,7 @@ impl RemoteAppServerClient {
     pub fn request_handle(&self) -> RemoteAppServerRequestHandle {
         RemoteAppServerRequestHandle {
             command_tx: self.command_tx.clone(),
+            upload_lock: std::sync::Arc::clone(&self.upload_lock),
         }
     }
 
@@ -611,6 +667,7 @@ impl RemoteAppServerClient {
             command_tx,
             event_rx,
             pending_events: _pending_events,
+            upload_lock: _upload_lock,
             worker_handle,
         } = self;
         let mut worker_handle = worker_handle;
@@ -674,6 +731,53 @@ impl RemoteAppServerRequestHandle {
         })?;
         serde_json::from_value(result)
             .map_err(|source| TypedRequestError::Deserialize { method, source })
+    }
+
+    pub(crate) async fn send_binary(&self, bytes: Vec<u8>) -> IoResult<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(RemoteClientCommand::SendBinary { bytes, response_tx })
+            .await
+            .map_err(|_| {
+                IoError::new(
+                    ErrorKind::BrokenPipe,
+                    "remote app-server worker channel is closed",
+                )
+            })?;
+        response_rx.await.map_err(|_| {
+            IoError::new(
+                ErrorKind::BrokenPipe,
+                "remote app-server binary send channel is closed",
+            )
+        })?
+    }
+
+    pub(crate) async fn next_binary(&self) -> IoResult<Vec<u8>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(RemoteClientCommand::NextBinary { response_tx })
+            .await
+            .map_err(|_| {
+                IoError::new(
+                    ErrorKind::BrokenPipe,
+                    "remote app-server worker channel is closed",
+                )
+            })?;
+        response_rx.await.map_err(|_| {
+            IoError::new(
+                ErrorKind::BrokenPipe,
+                "remote app-server binary receive channel is closed",
+            )
+        })?
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "one SFTP upload must own the shared websocket binary lane at a time"
+    )]
+    pub async fn upload_file_over_sftp(&self, path: &str, bytes: &[u8]) -> IoResult<()> {
+        let _guard = self.upload_lock.lock().await;
+        crate::sftp_upload::upload_file_over_sftp(self, path, bytes).await
     }
 }
 
@@ -864,6 +968,21 @@ async fn write_jsonrpc_message(
             ))
         })
 }
+
+async fn write_binary_message(
+    stream: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+    bytes: Vec<u8>,
+    websocket_url: &str,
+) -> IoResult<()> {
+    stream
+        .send(Message::Binary(bytes.into()))
+        .await
+        .map_err(|err| {
+            IoError::other(format!(
+                "failed to write binary websocket message to `{websocket_url}`: {err}"
+            ))
+        })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -879,6 +998,7 @@ mod tests {
             command_tx,
             event_rx,
             pending_events: VecDeque::new(),
+            upload_lock: std::sync::Arc::new(Mutex::new(())),
             worker_handle,
         };
 

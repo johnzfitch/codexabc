@@ -33,6 +33,7 @@ const SIDE_SLASH_COMMAND_UNAVAILABLE_HINT: &str = "Press Esc to return to the ma
 const GOAL_USAGE: &str = "Usage: /goal <objective>";
 const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
+const UPLOAD_USAGE: &str = "Usage: /upload <local-path>";
 
 impl ChatWidget {
     /// Dispatch a bare slash command and record its staged local-history entry.
@@ -392,6 +393,9 @@ impl ChatWidget {
             }
             SlashCommand::Ps => {
                 self.add_ps_output();
+            }
+            SlashCommand::Upload => {
+                self.add_info_message(UPLOAD_USAGE.to_string(), /*hint*/ None);
             }
             SlashCommand::Stop => {
                 self.clean_background_terminals();
@@ -776,6 +780,16 @@ impl ChatWidget {
                 self.app_event_tx
                     .send(AppEvent::BeginWindowsSandboxGrantReadRoot { path: args });
             }
+            SlashCommand::Upload if !trimmed.is_empty() => {
+                let path = PathBuf::from(trimmed);
+                self.app_event_tx.send(AppEvent::UploadLocalFile {
+                    path: if path.is_absolute() {
+                        path
+                    } else {
+                        self.config.cwd.join(path).to_path_buf()
+                    },
+                });
+            }
             _ => self.dispatch_command(cmd),
         }
         if source == SlashCommandDispatchSource::Live && cmd != SlashCommand::Goal {
@@ -826,6 +840,9 @@ impl ChatWidget {
 
         if rest.is_empty() {
             self.dispatch_command(cmd);
+            if cmd == SlashCommand::Upload {
+                return QueueDrain::Continue;
+            }
             return self.queued_command_drain_result(cmd);
         }
 
@@ -890,6 +907,35 @@ impl ChatWidget {
         }
     }
 
+    pub(super) fn queued_message_accepts_uploaded_file_path(
+        &self,
+        queued_message: &QueuedUserMessage,
+    ) -> bool {
+        match queued_message.action {
+            QueuedInputAction::Plain => true,
+            QueuedInputAction::RunShell => false,
+            QueuedInputAction::ParseSlash => {
+                let Some((name, rest, _rest_offset)) = parse_slash_name(&queued_message.text)
+                else {
+                    return true;
+                };
+                if name.contains('/') {
+                    return true;
+                }
+                let Some(cmd) =
+                    slash_commands::find_builtin_command(name, self.builtin_command_flags())
+                else {
+                    return false;
+                };
+                if rest.trim().is_empty() {
+                    return false;
+                }
+                matches!(cmd, SlashCommand::Plan | SlashCommand::Side)
+                    || !cmd.supports_inline_args()
+            }
+        }
+    }
+
     fn queued_command_drain_result(&self, cmd: SlashCommand) -> QueueDrain {
         if self.is_user_turn_pending_or_running() || !self.bottom_pane.no_modal_or_popup_active() {
             return QueueDrain::Stop;
@@ -938,6 +984,7 @@ impl ChatWidget {
             | SlashCommand::Experimental
             | SlashCommand::AutoReview
             | SlashCommand::Memories
+            | SlashCommand::Upload
             | SlashCommand::Quit
             | SlashCommand::Exit
             | SlashCommand::Logout
