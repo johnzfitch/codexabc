@@ -160,6 +160,7 @@ enum ShutdownAction {
 #[derive(Clone, Copy)]
 enum ShutdownSignal {
     Forceable,
+    #[cfg(unix)]
     GracefulOnly,
 }
 
