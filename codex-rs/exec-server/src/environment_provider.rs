@@ -16,7 +16,7 @@ use crate::environment::REMOTE_ENVIRONMENT_ID;
 /// local environment to be addressable by id should include it explicitly in
 /// the returned map.
 #[async_trait]
-pub trait EnvironmentProvider: Send + Sync {
+pub(crate) trait EnvironmentProvider: Send + Sync {
     /// Returns the provider-owned environment startup snapshot.
     async fn snapshot(
         &self,
@@ -25,13 +25,13 @@ pub trait EnvironmentProvider: Send + Sync {
 }
 
 #[derive(Clone, Debug)]
-pub struct EnvironmentProviderSnapshot {
+pub(crate) struct EnvironmentProviderSnapshot {
     pub environments: HashMap<String, Environment>,
     pub default: EnvironmentDefault,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EnvironmentDefault {
+pub(crate) enum EnvironmentDefault {
     Disabled,
     EnvironmentId(String),
 }

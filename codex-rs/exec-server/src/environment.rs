@@ -114,7 +114,7 @@ impl EnvironmentManager {
     }
 
     /// Builds a manager from a provider-supplied startup snapshot.
-    pub async fn from_provider<P>(
+    pub(crate) async fn from_provider<P>(
         provider: &P,
         local_runtime_paths: ExecServerRuntimePaths,
     ) -> Result<Self, ExecServerError>
@@ -338,10 +338,10 @@ mod tests {
     use super::EnvironmentManager;
     use super::LOCAL_ENVIRONMENT_ID;
     use super::REMOTE_ENVIRONMENT_ID;
-    use crate::EnvironmentProvider;
     use crate::ExecServerError;
     use crate::ExecServerRuntimePaths;
     use crate::ProcessId;
+    use crate::environment_provider::EnvironmentProvider;
     use crate::environment_provider::EnvironmentDefault;
     use crate::environment_provider::EnvironmentProviderSnapshot;
     use pretty_assertions::assert_eq;

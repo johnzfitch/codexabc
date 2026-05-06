@@ -9,13 +9,13 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::DefaultEnvironmentProvider;
 use crate::Environment;
-use crate::EnvironmentProvider;
 use crate::ExecServerError;
 use crate::ExecServerRuntimePaths;
 use crate::client_api::ExecServerTransportParams;
 use crate::client_api::StdioExecServerCommand;
 use crate::environment::LOCAL_ENVIRONMENT_ID;
 use crate::environment_provider::EnvironmentDefault;
+use crate::environment_provider::EnvironmentProvider;
 use crate::environment_provider::EnvironmentProviderSnapshot;
 
 const ENVIRONMENTS_TOML_FILE: &str = "environments.toml";

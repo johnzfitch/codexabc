@@ -527,7 +527,9 @@ mod tests {
     use tokio::io::BufReader;
     use tokio::time::timeout;
 
+    use super::RpcCallError;
     use super::RpcClient;
+    use super::RpcClientEvent;
     use crate::connection::JsonRpcConnection;
 
     async fn read_jsonrpc_line<R>(lines: &mut tokio::io::Lines<BufReader<R>>) -> JSONRPCMessage
@@ -630,5 +632,42 @@ mod tests {
         if let Err(err) = server.await {
             panic!("server task failed: {err}");
         }
+    }
+
+    #[tokio::test]
+    async fn stdio_malformed_message_closes_client_and_rejects_later_calls() {
+        let (client_stdin, _server_reader) = tokio::io::duplex(4096);
+        let (mut server_writer, client_stdout) = tokio::io::duplex(4096);
+        let connection =
+            JsonRpcConnection::from_stdio(client_stdout, client_stdin, "test-rpc".to_string());
+        let (client, mut events_rx) = RpcClient::new(connection);
+
+        server_writer
+            .write_all(b"not-json\n")
+            .await
+            .expect("malformed line should write");
+
+        let event = timeout(Duration::from_secs(1), events_rx.recv())
+            .await
+            .expect("disconnect event should not time out")
+            .expect("disconnect event should be sent");
+        let RpcClientEvent::Disconnected { reason } = event else {
+            panic!("expected disconnect event after malformed stdio message");
+        };
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("failed to parse JSON-RPC message")),
+            "disconnect should explain malformed stdio message, got {reason:?}"
+        );
+
+        let result = timeout(
+            Duration::from_secs(1),
+            client.call::<_, serde_json::Value>("after-malformed", &serde_json::json!({})),
+        )
+        .await
+        .expect("later call should fail instead of hanging");
+        assert!(matches!(result, Err(RpcCallError::Closed)));
+        assert_eq!(client.pending_request_count().await, 0);
     }
 }

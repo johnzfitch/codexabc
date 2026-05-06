@@ -107,13 +107,15 @@ impl JsonRpcConnection {
                                 }
                             }
                             Err(err) => {
-                                send_malformed_message(
+                                send_disconnected(
                                     &incoming_tx_for_reader,
+                                    &disconnected_tx_for_reader,
                                     Some(format!(
                                         "failed to parse JSON-RPC message from {reader_label}: {err}"
                                     )),
                                 )
                                 .await;
+                                break;
                             }
                         }
                     }
