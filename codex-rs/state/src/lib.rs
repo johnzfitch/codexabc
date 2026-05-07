@@ -10,6 +10,7 @@ mod migrations;
 mod model;
 mod paths;
 mod runtime;
+mod telemetry;
 
 pub use model::LogEntry;
 pub use model::LogQuery;
@@ -71,3 +72,32 @@ pub const DB_ERROR_METRIC: &str = "codex.db.error";
 pub const DB_METRIC_BACKFILL: &str = "codex.db.backfill";
 /// Metrics on backfill duration. Tags: [status]
 pub const DB_METRIC_BACKFILL_DURATION_MS: &str = "codex.db.backfill.duration_ms";
+/// SQLite startup initialization attempts. Tags: [status, phase, db, error_class, sqlite_code]
+pub const DB_INIT_METRIC: &str = "codex.db.init";
+/// SQLite startup initialization duration. Tags: [status, phase, db, error_class, sqlite_code]
+pub const DB_INIT_DURATION_METRIC: &str = "codex.db.init.duration_ms";
+/// SQLite operation attempts. Tags: [status, db, operation, access, error_class, sqlite_code]
+pub const DB_OPERATION_METRIC: &str = "codex.db.operation";
+/// SQLite operation duration. Tags: [status, db, operation, access, error_class, sqlite_code]
+pub const DB_OPERATION_DURATION_METRIC: &str = "codex.db.operation.duration_ms";
+/// Filesystem fallback after SQLite could not serve a request. Tags: [caller, reason]
+pub const DB_FALLBACK_METRIC: &str = "codex.db.fallback";
+/// SQLite log queue loss or flush failure. Tags: [event, reason]
+pub const DB_LOG_QUEUE_METRIC: &str = "codex.db.log_queue";
+
+pub fn record_db_fallback_metric(caller: &'static str, reason: &'static str) {
+    telemetry::record_fallback(caller, reason);
+}
+
+pub fn record_db_init_backfill_gate_metric(
+    duration: std::time::Duration,
+    result: &anyhow::Result<()>,
+) {
+    telemetry::record_init_result(
+        codex_otel::global().as_ref(),
+        telemetry::DbKind::None,
+        "backfill_gate",
+        duration,
+        result,
+    );
+}

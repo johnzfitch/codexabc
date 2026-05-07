@@ -9,41 +9,44 @@ impl StateRuntime {
 
     /// Insert a batch of log entries into the logs table.
     pub async fn insert_logs(&self, entries: &[LogEntry]) -> anyhow::Result<()> {
-        if entries.is_empty() {
-            return Ok(());
-        }
+        self.record_db_operation(DbKind::Logs, "insert_logs", DbAccess::Transaction, async {
+            if entries.is_empty() {
+                return Ok(());
+            }
 
-        let mut tx = self.logs_pool.begin().await?;
-        let mut builder = QueryBuilder::<Sqlite>::new(
-            "INSERT INTO logs (ts, ts_nanos, level, target, feedback_log_body, thread_id, process_uuid, module_path, file, line, estimated_bytes) ",
-        );
-        builder.push_values(entries, |mut row, entry| {
-            let feedback_log_body = entry.feedback_log_body.as_ref().or(entry.message.as_ref());
-            // Keep about 10 MiB of reader-visible log content per partition.
-            // Both `query_logs` and `/feedback` read the persisted
-            // `feedback_log_body`, while `LogEntry.message` is only a write-time
-            // fallback for callers that still populate the old field.
-            let estimated_bytes = feedback_log_body.map_or(0, String::len) as i64
-                + entry.level.len() as i64
-                + entry.target.len() as i64
-                + entry.module_path.as_ref().map_or(0, String::len) as i64
-                + entry.file.as_ref().map_or(0, String::len) as i64;
-            row.push_bind(entry.ts)
-                .push_bind(entry.ts_nanos)
-                .push_bind(&entry.level)
-                .push_bind(&entry.target)
-                .push_bind(feedback_log_body)
-                .push_bind(&entry.thread_id)
-                .push_bind(&entry.process_uuid)
-                .push_bind(&entry.module_path)
-                .push_bind(&entry.file)
-                .push_bind(entry.line)
-                .push_bind(estimated_bytes);
-        });
-        builder.build().execute(&mut *tx).await?;
-        self.prune_logs_after_insert(entries, &mut tx).await?;
-        tx.commit().await?;
-        Ok(())
+            let mut tx = self.logs_pool.begin().await?;
+            let mut builder = QueryBuilder::<Sqlite>::new(
+                "INSERT INTO logs (ts, ts_nanos, level, target, feedback_log_body, thread_id, process_uuid, module_path, file, line, estimated_bytes) ",
+            );
+            builder.push_values(entries, |mut row, entry| {
+                let feedback_log_body = entry.feedback_log_body.as_ref().or(entry.message.as_ref());
+                // Keep about 10 MiB of reader-visible log content per partition.
+                // Both `query_logs` and `/feedback` read the persisted
+                // `feedback_log_body`, while `LogEntry.message` is only a write-time
+                // fallback for callers that still populate the old field.
+                let estimated_bytes = feedback_log_body.map_or(0, String::len) as i64
+                    + entry.level.len() as i64
+                    + entry.target.len() as i64
+                    + entry.module_path.as_ref().map_or(0, String::len) as i64
+                    + entry.file.as_ref().map_or(0, String::len) as i64;
+                row.push_bind(entry.ts)
+                    .push_bind(entry.ts_nanos)
+                    .push_bind(&entry.level)
+                    .push_bind(&entry.target)
+                    .push_bind(feedback_log_body)
+                    .push_bind(&entry.thread_id)
+                    .push_bind(&entry.process_uuid)
+                    .push_bind(&entry.module_path)
+                    .push_bind(&entry.file)
+                    .push_bind(entry.line)
+                    .push_bind(estimated_bytes);
+            });
+            builder.build().execute(&mut *tx).await?;
+            self.prune_logs_after_insert(entries, &mut tx).await?;
+            tx.commit().await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Enforce per-partition retained-log-content caps after a successful batch insert.

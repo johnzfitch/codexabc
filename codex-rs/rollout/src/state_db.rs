@@ -115,16 +115,31 @@ async fn try_init_with_roots_inner(
                     sqlite_home.display()
                 )
             })?;
+    let backfill_gate_started = Instant::now();
     let wait_started = Instant::now();
     let mut reported_wait = false;
     loop {
-        let backfill_state = runtime.get_backfill_state().await.map_err(|err| {
-            anyhow::anyhow!(
-                "failed to read backfill state at {}: {err}",
-                codex_home.display()
-            )
-        })?;
+        let backfill_state = match runtime.get_backfill_state().await {
+            Ok(state) => state,
+            Err(err) => {
+                let err = anyhow::anyhow!(
+                    "failed to read backfill state at {}: {err}",
+                    codex_home.display()
+                );
+                let result: anyhow::Result<()> = Err(err);
+                codex_state::record_db_init_backfill_gate_metric(
+                    backfill_gate_started.elapsed(),
+                    &result,
+                );
+                return result.map(|()| runtime);
+            }
+        };
         if backfill_state.status == codex_state::BackfillStatus::Complete {
+            let result: anyhow::Result<()> = Ok(());
+            codex_state::record_db_init_backfill_gate_metric(
+                backfill_gate_started.elapsed(),
+                &result,
+            );
             return Ok(runtime);
         }
 
@@ -144,22 +159,41 @@ async fn try_init_with_roots_inner(
             )
             .await;
         }
-        let backfill_state = runtime.get_backfill_state().await.map_err(|err| {
-            anyhow::anyhow!(
-                "failed to read backfill state at {} after startup backfill: {err}",
-                codex_home.display()
-            )
-        })?;
+        let backfill_state = match runtime.get_backfill_state().await {
+            Ok(state) => state,
+            Err(err) => {
+                let err = anyhow::anyhow!(
+                    "failed to read backfill state at {} after startup backfill: {err}",
+                    codex_home.display()
+                );
+                let result: anyhow::Result<()> = Err(err);
+                codex_state::record_db_init_backfill_gate_metric(
+                    backfill_gate_started.elapsed(),
+                    &result,
+                );
+                return result.map(|()| runtime);
+            }
+        };
         if backfill_state.status == codex_state::BackfillStatus::Complete {
+            let result: anyhow::Result<()> = Ok(());
+            codex_state::record_db_init_backfill_gate_metric(
+                backfill_gate_started.elapsed(),
+                &result,
+            );
             return Ok(runtime);
         }
         if wait_started.elapsed() >= STARTUP_BACKFILL_WAIT_TIMEOUT {
-            return Err(anyhow::anyhow!(
+            let result: anyhow::Result<()> = Err(anyhow::anyhow!(
                 "timed out waiting for state db backfill at {} after {:?} (status: {})",
                 codex_home.display(),
                 STARTUP_BACKFILL_WAIT_TIMEOUT,
                 backfill_state.status.as_str()
             ));
+            codex_state::record_db_init_backfill_gate_metric(
+                backfill_gate_started.elapsed(),
+                &result,
+            );
+            return result.map(|()| runtime);
         }
 
         let message = format!(
@@ -195,14 +229,21 @@ fn emit_startup_warning(message: &str) {
 pub async fn get_state_db(config: &impl RolloutConfigView) -> Option<StateDbHandle> {
     let state_path = codex_state::state_db_path(config.sqlite_home());
     if !tokio::fs::try_exists(&state_path).await.unwrap_or(false) {
+        codex_state::record_db_fallback_metric("get_state_db", "db_unavailable");
         return None;
     }
-    let runtime = codex_state::StateRuntime::init(
+    let runtime = match codex_state::StateRuntime::init(
         config.sqlite_home().to_path_buf(),
         config.model_provider_id().to_string(),
     )
     .await
-    .ok()?;
+    {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            codex_state::record_db_fallback_metric("get_state_db", "db_error");
+            return None;
+        }
+    };
     require_backfill_complete(runtime, config.sqlite_home()).await
 }
 
@@ -218,6 +259,7 @@ async fn require_backfill_complete(
                 codex_home.display(),
                 state.status.as_str()
             );
+            codex_state::record_db_fallback_metric("get_state_db", "backfill_incomplete");
             None
         }
         Err(err) => {
@@ -225,6 +267,7 @@ async fn require_backfill_complete(
                 "failed to read backfill state at {}: {err}",
                 codex_home.display()
             );
+            codex_state::record_db_fallback_metric("get_state_db", "db_error");
             None
         }
     }

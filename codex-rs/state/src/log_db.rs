@@ -43,6 +43,7 @@ use uuid::Uuid;
 
 use crate::LogEntry;
 use crate::StateRuntime;
+use crate::telemetry;
 
 const LOG_QUEUE_CAPACITY: usize = 512;
 const LOG_BATCH_SIZE: usize = 128;
@@ -94,6 +95,7 @@ where
 pub struct LogDbLayer {
     sender: mpsc::Sender<LogDbCommand>,
     process_uuid: String,
+    metrics: Option<codex_otel::MetricsClient>,
 }
 
 pub fn start(state_db: std::sync::Arc<StateRuntime>) -> LogDbLayer {
@@ -105,6 +107,7 @@ impl Clone for LogDbLayer {
         Self {
             sender: self.sender.clone(),
             process_uuid: self.process_uuid.clone(),
+            metrics: self.metrics.clone(),
         }
     }
 }
@@ -120,22 +123,34 @@ impl LogDbLayer {
     ) -> Self {
         let config = config.normalized();
         let (sender, receiver) = mpsc::channel(config.queue_capacity);
+        let metrics = state_db.metrics().cloned();
         tokio::spawn(run_inserter(state_db, receiver, config));
         Self {
             sender,
             process_uuid: current_process_log_uuid().to_string(),
+            metrics,
         }
     }
 
     pub async fn flush(&self) {
         let (tx, rx) = oneshot::channel();
-        if self.sender.send(LogDbCommand::Flush(tx)).await.is_ok() {
-            let _ = rx.await;
+        if self.sender.send(LogDbCommand::Flush(tx)).await.is_err() {
+            telemetry::record_log_queue(self.metrics.as_ref(), "flush_failed", "closed");
+            return;
+        }
+        if rx.await.is_err() {
+            telemetry::record_log_queue(self.metrics.as_ref(), "flush_failed", "closed");
         }
     }
 
     fn try_send(&self, entry: LogEntry) {
-        let _ = self.sender.try_send(LogDbCommand::Entry(Box::new(entry)));
+        if let Err(err) = self.sender.try_send(LogDbCommand::Entry(Box::new(entry))) {
+            let reason = match err {
+                mpsc::error::TrySendError::Full(_) => "full",
+                mpsc::error::TrySendError::Closed(_) => "closed",
+            };
+            telemetry::record_log_queue(self.metrics.as_ref(), "dropped", reason);
+        }
     }
 }
 
@@ -401,7 +416,9 @@ async fn flush(state_db: &StateRuntime, buffer: &mut Vec<LogEntry>) {
         return;
     }
     let entries = buffer.split_off(0);
-    let _ = state_db.insert_logs(entries.as_slice()).await;
+    if state_db.insert_logs(entries.as_slice()).await.is_err() {
+        telemetry::record_log_queue(state_db.metrics(), "flush_failed", "insert_failed");
+    }
 }
 
 #[derive(Default)]
@@ -721,6 +738,7 @@ mod tests {
         let layer = LogDbLayer {
             sender,
             process_uuid: "process-1".to_string(),
+            metrics: None,
         };
 
         layer.try_send(test_entry("first-queued-log"));
@@ -741,6 +759,7 @@ mod tests {
         let layer = LogDbLayer {
             sender,
             process_uuid: "process-1".to_string(),
+            metrics: None,
         };
 
         layer.try_send(test_entry("queued-before-flush"));

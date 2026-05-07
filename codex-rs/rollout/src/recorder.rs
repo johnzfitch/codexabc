@@ -450,6 +450,7 @@ impl RolloutRecorder {
         if state_db_ctx.is_none() {
             // Keep legacy behavior when SQLite is unavailable: return filesystem results
             // at the requested page size.
+            codex_state::record_db_fallback_metric("list_threads", "db_unavailable");
             return Ok(page_from_filesystem_scan(
                 fs_page,
                 sort_direction,
@@ -569,6 +570,7 @@ impl RolloutRecorder {
         }
         if listing_has_metadata_filters {
             let page = page_from_filesystem_scan(fs_page, sort_direction, page_size, sort_key);
+            codex_state::record_db_fallback_metric("list_threads", "db_error");
             return Ok(fill_missing_thread_item_metadata_from_state_db(
                 state_db_ctx.as_deref(),
                 page,
@@ -578,6 +580,7 @@ impl RolloutRecorder {
         // If SQLite listing still fails, return the filesystem page rather than failing the list.
         tracing::error!("Falling back on rollout system");
         tracing::warn!("state db discrepancy during list_threads_with_db_fallback: falling_back");
+        codex_state::record_db_fallback_metric("list_threads", "db_error");
         Ok(page_from_filesystem_scan(
             fs_page,
             sort_direction,
