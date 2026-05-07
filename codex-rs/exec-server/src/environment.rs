@@ -41,6 +41,7 @@ pub const CODEX_EXEC_SERVER_URL_ENV_VAR: &str = "CODEX_EXEC_SERVER_URL";
 #[derive(Debug)]
 pub struct EnvironmentManager {
     default_environment: Option<String>,
+    configured_environment_ids: Vec<String>,
     environments: HashMap<String, Arc<Environment>>,
     local_environment: Arc<Environment>,
 }
@@ -53,6 +54,7 @@ impl EnvironmentManager {
     pub fn default_for_tests() -> Self {
         Self {
             default_environment: Some(LOCAL_ENVIRONMENT_ID.to_string()),
+            configured_environment_ids: vec![LOCAL_ENVIRONMENT_ID.to_string()],
             environments: HashMap::from([(
                 LOCAL_ENVIRONMENT_ID.to_string(),
                 Arc::new(Environment::default_for_tests()),
@@ -65,6 +67,7 @@ impl EnvironmentManager {
     pub fn disabled_for_tests(local_runtime_paths: ExecServerRuntimePaths) -> Self {
         Self {
             default_environment: None,
+            configured_environment_ids: Vec::new(),
             environments: HashMap::new(),
             local_environment: Arc::new(Environment::local(local_runtime_paths)),
         }
@@ -135,18 +138,28 @@ impl EnvironmentManager {
             environments,
             default,
         } = snapshot;
-        for id in environments.keys() {
+        let mut configured_environment_ids = Vec::with_capacity(environments.len());
+        let mut environment_map = HashMap::with_capacity(environments.len());
+        for (id, environment) in environments {
             if id.is_empty() {
                 return Err(ExecServerError::Protocol(
                     "environment id cannot be empty".to_string(),
                 ));
             }
+            if environment_map
+                .insert(id.clone(), Arc::new(environment))
+                .is_some()
+            {
+                return Err(ExecServerError::Protocol(format!(
+                    "environment id `{id}` is duplicated"
+                )));
+            }
+            configured_environment_ids.push(id);
         }
-
         let default_environment = match default {
             EnvironmentDefault::Disabled => None,
             EnvironmentDefault::EnvironmentId(environment_id) => {
-                if !environments.contains_key(&environment_id) {
+                if !environment_map.contains_key(&environment_id) {
                     return Err(ExecServerError::Protocol(format!(
                         "default environment `{environment_id}` is not configured"
                     )));
@@ -155,14 +168,11 @@ impl EnvironmentManager {
             }
         };
         let local_environment = Arc::new(Environment::local(local_runtime_paths));
-        let environments = environments
-            .into_iter()
-            .map(|(id, environment)| (id, Arc::new(environment)))
-            .collect();
 
         Ok(Self {
             default_environment,
-            environments,
+            configured_environment_ids,
+            environments: environment_map,
             local_environment,
         })
     }
@@ -177,6 +187,26 @@ impl EnvironmentManager {
     /// Returns the id of the default environment.
     pub fn default_environment_id(&self) -> Option<&str> {
         self.default_environment.as_deref()
+    }
+
+    /// Returns the ordered environment ids used for new thread startup.
+    pub fn default_environment_ids(&self) -> Vec<String> {
+        let Some(default_environment_id) = self.default_environment.as_deref() else {
+            return Vec::new();
+        };
+        if self.configured_environment_ids.len() <= 1 {
+            return vec![default_environment_id.to_string()];
+        }
+
+        let mut environment_ids = Vec::with_capacity(self.configured_environment_ids.len());
+        environment_ids.push(default_environment_id.to_string());
+        environment_ids.extend(
+            self.configured_environment_ids
+                .iter()
+                .filter(|environment_id| environment_id.as_str() != default_environment_id)
+                .cloned(),
+        );
+        environment_ids
     }
 
     /// Returns the local environment instance used for internal runtime work.
@@ -331,7 +361,6 @@ impl Environment {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use super::Environment;
@@ -453,11 +482,11 @@ mod tests {
     async fn environment_manager_builds_from_provider() {
         let provider = TestEnvironmentProvider {
             snapshot: EnvironmentProviderSnapshot {
-                environments: HashMap::from([(
+                environments: vec![(
                     REMOTE_ENVIRONMENT_ID.to_string(),
                     Environment::create_for_tests(Some("ws://127.0.0.1:8765".to_string()))
                         .expect("remote environment"),
-                )]),
+                )],
                 default: EnvironmentDefault::EnvironmentId(REMOTE_ENVIRONMENT_ID.to_string()),
             },
         };
@@ -483,7 +512,7 @@ mod tests {
     async fn environment_manager_rejects_empty_environment_id() {
         let provider = TestEnvironmentProvider {
             snapshot: EnvironmentProviderSnapshot {
-                environments: HashMap::from([("".to_string(), Environment::default_for_tests())]),
+                environments: vec![("".to_string(), Environment::default_for_tests())],
                 default: EnvironmentDefault::Disabled,
             },
         };
@@ -501,7 +530,7 @@ mod tests {
     async fn environment_manager_uses_explicit_provider_default() {
         let provider = TestEnvironmentProvider {
             snapshot: EnvironmentProviderSnapshot {
-                environments: HashMap::from([
+                environments: vec![
                     (
                         LOCAL_ENVIRONMENT_ID.to_string(),
                         Environment::default_for_tests(),
@@ -511,7 +540,7 @@ mod tests {
                         Environment::create_for_tests(Some("ws://127.0.0.1:8765".to_string()))
                             .expect("remote environment"),
                     ),
-                ]),
+                ],
                 default: EnvironmentDefault::EnvironmentId("devbox".to_string()),
             },
         };
@@ -520,6 +549,10 @@ mod tests {
             .expect("manager");
 
         assert_eq!(manager.default_environment_id(), Some("devbox"));
+        assert_eq!(
+            manager.default_environment_ids(),
+            vec!["devbox".to_string(), LOCAL_ENVIRONMENT_ID.to_string()]
+        );
         assert!(manager.default_environment().expect("default").is_remote());
     }
 
@@ -527,10 +560,10 @@ mod tests {
     async fn environment_manager_disables_provider_default() {
         let provider = TestEnvironmentProvider {
             snapshot: EnvironmentProviderSnapshot {
-                environments: HashMap::from([(
+                environments: vec![(
                     LOCAL_ENVIRONMENT_ID.to_string(),
                     Environment::default_for_tests(),
-                )]),
+                )],
                 default: EnvironmentDefault::Disabled,
             },
         };
@@ -547,10 +580,10 @@ mod tests {
     async fn environment_manager_rejects_unknown_provider_default() {
         let provider = TestEnvironmentProvider {
             snapshot: EnvironmentProviderSnapshot {
-                environments: HashMap::from([(
+                environments: vec![(
                     LOCAL_ENVIRONMENT_ID.to_string(),
                     Environment::default_for_tests(),
-                )]),
+                )],
                 default: EnvironmentDefault::EnvironmentId("missing".to_string()),
             },
         };
