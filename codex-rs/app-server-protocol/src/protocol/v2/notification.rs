@@ -1,3 +1,4 @@
+use super::QueuedTurn;
 use super::TurnError;
 use crate::RequestId;
 use schemars::JsonSchema;
@@ -53,4 +54,12 @@ pub struct ErrorNotification {
 pub struct ServerRequestResolvedNotification {
     pub thread_id: String,
     pub request_id: RequestId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadQueueChangedNotification {
+    pub thread_id: String,
+    pub queued_turns: Vec<QueuedTurn>,
 }

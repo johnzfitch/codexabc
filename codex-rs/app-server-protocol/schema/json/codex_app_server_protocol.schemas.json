@@ -4017,6 +4017,26 @@
           "properties": {
             "method": {
               "enum": [
+                "thread/queue/changed"
+              ],
+              "title": "Thread/queue/changedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadQueueChangedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Thread/queue/changedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "thread/tokenUsage/updated"
               ],
               "title": "Thread/tokenUsage/updatedNotificationMethod",
@@ -13181,6 +13201,130 @@
         },
         "type": "object"
       },
+      "QueuedTurn": {
+        "properties": {
+          "createdAt": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "lastDispatchError": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "queueOrder": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "turnStartParams": {
+            "$ref": "#/definitions/v2/QueuedTurnStartParams"
+          }
+        },
+        "required": [
+          "createdAt",
+          "id",
+          "queueOrder",
+          "turnStartParams"
+        ],
+        "type": "object"
+      },
+      "QueuedTurnStartParams": {
+        "properties": {
+          "approvalPolicy": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AskForApproval"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "approvalsReviewer": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ApprovalsReviewer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "input": {
+            "items": {
+              "$ref": "#/definitions/v2/UserInput"
+            },
+            "type": "array"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outputSchema": true,
+          "personality": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/Personality"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sandboxPolicy": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/SandboxPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "serviceTier": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ReasoningSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "input"
+        ],
+        "type": "object"
+      },
       "RateLimitReachedType": {
         "enum": [
           "rate_limit_reached",
@@ -16772,6 +16916,26 @@
           "threadId"
         ],
         "title": "ThreadNameUpdatedNotification",
+        "type": "object"
+      },
+      "ThreadQueueChangedNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "queuedTurns": {
+            "items": {
+              "$ref": "#/definitions/v2/QueuedTurn"
+            },
+            "type": "array"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "queuedTurns",
+          "threadId"
+        ],
+        "title": "ThreadQueueChangedNotification",
         "type": "object"
       },
       "ThreadReadParams": {

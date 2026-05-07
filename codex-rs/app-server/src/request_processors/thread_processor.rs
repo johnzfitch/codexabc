@@ -314,6 +314,7 @@ pub(crate) struct ThreadRequestProcessor {
     pub(super) thread_watch_manager: ThreadWatchManager,
     pub(super) thread_list_state_permit: Arc<Semaphore>,
     pub(super) thread_goal_processor: ThreadGoalRequestProcessor,
+    pub(super) thread_queue_processor: ThreadQueueRequestProcessor,
     pub(super) state_db: Option<StateDbHandle>,
     pub(super) background_tasks: TaskTracker,
 }
@@ -333,6 +334,7 @@ impl ThreadRequestProcessor {
         thread_watch_manager: ThreadWatchManager,
         thread_list_state_permit: Arc<Semaphore>,
         thread_goal_processor: ThreadGoalRequestProcessor,
+        thread_queue_processor: ThreadQueueRequestProcessor,
         state_db: Option<StateDbHandle>,
     ) -> Self {
         Self {
@@ -348,6 +350,7 @@ impl ThreadRequestProcessor {
             thread_watch_manager,
             thread_list_state_permit,
             thread_goal_processor,
+            thread_queue_processor,
             state_db,
             background_tasks: TaskTracker::new(),
         }
@@ -742,6 +745,7 @@ impl ThreadRequestProcessor {
             thread_list_state_permit: self.thread_list_state_permit.clone(),
             fallback_model_provider: self.config.model_provider_id.clone(),
             codex_home: self.config.codex_home.to_path_buf(),
+            thread_queue_processor: Some(self.thread_queue_processor.clone()),
         }
     }
 
@@ -839,6 +843,7 @@ impl ThreadRequestProcessor {
             thread_list_state_permit: self.thread_list_state_permit.clone(),
             fallback_model_provider: self.config.model_provider_id.clone(),
             codex_home: self.config.codex_home.to_path_buf(),
+            thread_queue_processor: Some(self.thread_queue_processor.clone()),
         };
         let request_trace = request_context.request_trace();
         let config_manager = self.config_manager.clone();
@@ -2517,6 +2522,9 @@ impl ThreadRequestProcessor {
                 self.thread_goal_processor
                     .emit_resume_goal_snapshot_and_continue(thread_id, codex_thread.as_ref())
                     .await;
+                self.thread_queue_processor
+                    .emit_resume_queue_snapshot_and_drain(thread_id)
+                    .await;
             }
             Err(err) => {
                 let error = internal_error(format!("error resuming thread: {err}"));
@@ -2675,6 +2683,8 @@ impl ThreadRequestProcessor {
             let thread_goal_state_db = emit_thread_goal_update
                 .then(|| self.state_db.clone())
                 .flatten();
+            let emit_thread_queue_update = true;
+            let thread_queue_state_db = self.state_db.clone();
 
             let command = crate::thread_state::ThreadListenerCommand::SendThreadResumeResponse(
                 Box::new(crate::thread_state::PendingThreadResumeRequest {
@@ -2685,6 +2695,8 @@ impl ThreadRequestProcessor {
                     thread_summary,
                     emit_thread_goal_update,
                     thread_goal_state_db,
+                    emit_thread_queue_update,
+                    thread_queue_state_db,
                     include_turns: !params.exclude_turns,
                 }),
             );

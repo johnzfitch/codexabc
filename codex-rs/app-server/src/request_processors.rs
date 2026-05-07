@@ -469,6 +469,7 @@ pub(crate) use process_exec_processor::ProcessExecRequestProcessor;
 pub(crate) use search::SearchRequestProcessor;
 pub(crate) use thread_goal_processor::ThreadGoalRequestProcessor;
 pub(crate) use thread_processor::ThreadRequestProcessor;
+pub(crate) use thread_queue_processor::ThreadQueueRequestProcessor;
 pub(crate) use turn_processor::TurnRequestProcessor;
 pub(crate) use windows_sandbox_processor::WindowsSandboxRequestProcessor;
 
@@ -486,12 +487,14 @@ mod config_errors;
 mod request_errors;
 mod thread_goal_processor;
 mod thread_lifecycle;
+mod thread_queue_processor;
 mod thread_summary;
 
 use self::config_errors::*;
 use self::request_errors::*;
 use self::thread_goal_processor::api_thread_goal_from_state;
 use self::thread_lifecycle::*;
+use self::thread_queue_processor::send_thread_queue_snapshot_notification;
 use self::thread_summary::*;
 
 pub(crate) use self::thread_lifecycle::populate_thread_turns_from_history;

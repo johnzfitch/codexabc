@@ -1,5 +1,6 @@
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
+use codex_app_server_protocol::QueuedTurn;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadGoal;
 use codex_app_server_protocol::ThreadHistoryBuilder;
@@ -32,6 +33,8 @@ pub(crate) struct PendingThreadResumeRequest {
     pub(crate) thread_summary: codex_app_server_protocol::Thread,
     pub(crate) emit_thread_goal_update: bool,
     pub(crate) thread_goal_state_db: Option<StateDbHandle>,
+    pub(crate) emit_thread_queue_update: bool,
+    pub(crate) thread_queue_state_db: Option<StateDbHandle>,
     pub(crate) include_turns: bool,
 }
 
@@ -47,6 +50,14 @@ pub(crate) enum ThreadListenerCommand {
     EmitThreadGoalCleared,
     // EmitThreadGoalSnapshot is used to read and emit the latest goal state in the listener order.
     EmitThreadGoalSnapshot {
+        state_db: StateDbHandle,
+    },
+    // EmitThreadQueueChanged is used to order app-server queue updates with running-thread resume responses.
+    EmitThreadQueueChanged {
+        queued_turns: Vec<QueuedTurn>,
+    },
+    // EmitThreadQueueSnapshot is used to read and emit the latest queue state in listener order.
+    EmitThreadQueueSnapshot {
         state_db: StateDbHandle,
     },
     // ResolveServerRequest is used to notify the client that the request has been resolved.

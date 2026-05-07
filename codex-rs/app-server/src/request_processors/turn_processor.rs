@@ -53,7 +53,7 @@ impl TurnRequestProcessor {
         app_server_client_version: Option<String>,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         self.turn_start_inner(
-            request_id,
+            Some(&request_id),
             params,
             app_server_client_name,
             app_server_client_version,
@@ -69,6 +69,17 @@ impl TurnRequestProcessor {
         self.thread_inject_items_response_inner(params)
             .await
             .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn start_queued_turn(
+        &self,
+        params: TurnStartParams,
+    ) -> Result<TurnStartResponse, JSONRPCErrorError> {
+        self.turn_start_inner(
+            /*request_id*/ None, params, /*app_server_client_name*/ None,
+            /*app_server_client_version*/ None,
+        )
+        .await
     }
 
     pub(crate) async fn turn_steer(
@@ -273,14 +284,17 @@ impl TurnRequestProcessor {
 
     async fn request_trace_context(
         &self,
-        request_id: &ConnectionRequestId,
+        request_id: Option<&ConnectionRequestId>,
     ) -> Option<codex_protocol::protocol::W3cTraceContext> {
-        self.outgoing.request_trace_context(request_id).await
+        match request_id {
+            Some(request_id) => self.outgoing.request_trace_context(request_id).await,
+            None => None,
+        }
     }
 
     async fn submit_core_op(
         &self,
-        request_id: &ConnectionRequestId,
+        request_id: Option<&ConnectionRequestId>,
         thread: &CodexThread,
         op: Op,
     ) -> CodexResult<String> {
@@ -301,7 +315,7 @@ impl TurnRequestProcessor {
         error
     }
 
-    fn validate_v2_input_limit(items: &[V2UserInput]) -> Result<(), JSONRPCErrorError> {
+    pub(crate) fn validate_v2_input_limit(items: &[V2UserInput]) -> Result<(), JSONRPCErrorError> {
         let actual_chars: usize = items.iter().map(V2UserInput::text_char_count).sum();
         if actual_chars > MAX_USER_INPUT_TEXT_CHARS {
             return Err(Self::input_too_large_error(actual_chars));
@@ -311,24 +325,28 @@ impl TurnRequestProcessor {
 
     async fn turn_start_inner(
         &self,
-        request_id: ConnectionRequestId,
+        request_id: Option<&ConnectionRequestId>,
         params: TurnStartParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
     ) -> Result<TurnStartResponse, JSONRPCErrorError> {
         if let Err(error) = Self::validate_v2_input_limit(&params.input) {
-            self.track_error_response(
-                &request_id,
-                &error,
-                Some(AnalyticsJsonRpcError::Input(InputError::TooLarge)),
-            );
+            if let Some(request_id) = request_id {
+                self.track_error_response(
+                    request_id,
+                    &error,
+                    Some(AnalyticsJsonRpcError::Input(InputError::TooLarge)),
+                );
+            }
             return Err(error);
         }
         let (thread_id, thread) =
             self.load_thread(&params.thread_id)
                 .await
                 .inspect_err(|error| {
-                    self.track_error_response(&request_id, error, /*error_type*/ None);
+                    if let Some(request_id) = request_id {
+                        self.track_error_response(request_id, error, /*error_type*/ None);
+                    }
                 })?;
         Self::set_app_server_client_info(
             thread.as_ref(),
@@ -337,7 +355,9 @@ impl TurnRequestProcessor {
         )
         .await
         .inspect_err(|error| {
-            self.track_error_response(&request_id, error, /*error_type*/ None);
+            if let Some(request_id) = request_id {
+                self.track_error_response(request_id, error, /*error_type*/ None);
+            }
         })?;
 
         let collaboration_mode = params
@@ -476,11 +496,13 @@ impl TurnRequestProcessor {
             }
         };
         let turn_id = self
-            .submit_core_op(&request_id, thread.as_ref(), turn_op)
+            .submit_core_op(request_id, thread.as_ref(), turn_op)
             .await
             .map_err(|err| {
                 let error = internal_error(format!("failed to start turn: {err}"));
-                self.track_error_response(&request_id, &error, /*error_type*/ None);
+                if let Some(request_id) = request_id {
+                    self.track_error_response(request_id, &error, /*error_type*/ None);
+                }
                 error
             })?;
 
@@ -496,9 +518,11 @@ impl TurnRequestProcessor {
             );
         }
 
-        self.outgoing
-            .record_request_turn_id(&request_id, &turn_id)
-            .await;
+        if let Some(request_id) = request_id {
+            self.outgoing
+                .record_request_turn_id(request_id, &turn_id)
+                .await;
+        }
         let turn = Turn {
             id: turn_id,
             items: vec![],
@@ -706,7 +730,7 @@ impl TurnRequestProcessor {
             return Ok(None);
         };
         self.submit_core_op(
-            request_id,
+            Some(request_id),
             thread.as_ref(),
             Op::RealtimeConversationStart(ConversationStartParams {
                 output_modality: params.output_modality,
@@ -740,7 +764,7 @@ impl TurnRequestProcessor {
             return Ok(None);
         };
         self.submit_core_op(
-            request_id,
+            Some(request_id),
             thread.as_ref(),
             Op::RealtimeConversationAudio(ConversationAudioParams {
                 frame: params.audio.into(),
@@ -767,7 +791,7 @@ impl TurnRequestProcessor {
             return Ok(None);
         };
         self.submit_core_op(
-            request_id,
+            Some(request_id),
             thread.as_ref(),
             Op::RealtimeConversationText(ConversationTextParams { text: params.text }),
         )
@@ -791,11 +815,13 @@ impl TurnRequestProcessor {
         else {
             return Ok(None);
         };
-        self.submit_core_op(request_id, thread.as_ref(), Op::RealtimeConversationClose)
-            .await
-            .map_err(|err| {
-                internal_error(format!("failed to stop realtime conversation: {err}"))
-            })?;
+        self.submit_core_op(
+            Some(request_id),
+            thread.as_ref(),
+            Op::RealtimeConversationClose,
+        )
+        .await
+        .map_err(|err| internal_error(format!("failed to stop realtime conversation: {err}")))?;
         Ok(Some(ThreadRealtimeStopResponse::default()))
     }
 
@@ -850,7 +876,7 @@ impl TurnRequestProcessor {
     ) -> std::result::Result<(), JSONRPCErrorError> {
         let turn_id = self
             .submit_core_op(
-                request_id,
+                Some(request_id),
                 parent_thread.as_ref(),
                 Op::Review { review_request },
             )
@@ -906,7 +932,7 @@ impl TurnRequestProcessor {
                 }),
                 /*thread_source*/ None,
                 /*persist_extended_history*/ false,
-                self.request_trace_context(request_id).await,
+                self.request_trace_context(Some(request_id)).await,
             )
             .await
             .map_err(|err| {
@@ -957,7 +983,7 @@ impl TurnRequestProcessor {
 
         let turn_id = self
             .submit_core_op(
-                request_id,
+                Some(request_id),
                 review_thread.as_ref(),
                 Op::Review { review_request },
             )
@@ -1052,7 +1078,7 @@ impl TurnRequestProcessor {
         // Submit the interrupt. Turn interrupts respond upon TurnAborted; startup
         // interrupts respond here because startup cancellation has no turn event.
         match self
-            .submit_core_op(request_id, thread.as_ref(), Op::Interrupt)
+            .submit_core_op(Some(request_id), thread.as_ref(), Op::Interrupt)
             .await
         {
             Ok(_) if is_startup_interrupt => Ok(Some(TurnInterruptResponse {})),
@@ -1087,6 +1113,7 @@ impl TurnRequestProcessor {
             thread_list_state_permit: self.thread_list_state_permit.clone(),
             fallback_model_provider: self.config.model_provider_id.clone(),
             codex_home: self.config.codex_home.to_path_buf(),
+            thread_queue_processor: None,
         }
     }
 

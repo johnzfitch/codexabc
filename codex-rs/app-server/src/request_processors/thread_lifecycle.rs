@@ -1,4 +1,5 @@
 use super::*;
+use codex_app_server_protocol::ThreadQueueChangedNotification;
 
 pub(super) const THREAD_UNLOADING_DELAY: Duration = Duration::from_secs(30 * 60);
 
@@ -12,6 +13,7 @@ pub(super) struct ListenerTaskContext {
     pub(super) thread_list_state_permit: Arc<Semaphore>,
     pub(super) fallback_model_provider: String,
     pub(super) codex_home: PathBuf,
+    pub(super) thread_queue_processor: Option<ThreadQueueRequestProcessor>,
 }
 
 struct UnloadingState {
@@ -242,6 +244,7 @@ pub(super) async fn ensure_listener_task_running(
         thread_list_state_permit,
         fallback_model_provider,
         codex_home,
+        thread_queue_processor,
     } = listener_task_context;
     let outgoing_for_task = Arc::clone(&outgoing);
     tokio::spawn(async move {
@@ -320,6 +323,13 @@ pub(super) async fn ensure_listener_task_running(
                         fallback_model_provider.clone(),
                     )
                     .await;
+                    if matches!(event.msg, EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_))
+                        && let Some(thread_queue_processor) = thread_queue_processor.as_ref()
+                    {
+                        thread_queue_processor
+                            .drain_thread_queue_after_terminal_turn(conversation_id)
+                            .await;
+                    }
                 }
                 unloading_watchers_open = unloading_state.wait_for_unloading_trigger() => {
                     if !unloading_watchers_open {
@@ -474,6 +484,19 @@ pub(super) async fn handle_thread_listener_command(
         }
         ThreadListenerCommand::EmitThreadGoalSnapshot { state_db } => {
             send_thread_goal_snapshot_notification(outgoing, conversation_id, &state_db).await;
+        }
+        ThreadListenerCommand::EmitThreadQueueChanged { queued_turns } => {
+            outgoing
+                .send_server_notification(ServerNotification::ThreadQueueChanged(
+                    ThreadQueueChangedNotification {
+                        thread_id: conversation_id.to_string(),
+                        queued_turns,
+                    },
+                ))
+                .await;
+        }
+        ThreadListenerCommand::EmitThreadQueueSnapshot { state_db } => {
+            send_thread_queue_snapshot_notification(outgoing, conversation_id, &state_db).await;
         }
         ThreadListenerCommand::ResolveServerRequest {
             request_id,
@@ -640,6 +663,16 @@ pub(super) async fn handle_pending_thread_resume_request(
             tracing::warn!(
                 thread_id = %conversation_id,
                 "state db unavailable when reading thread goal for running thread resume"
+            );
+        }
+    }
+    if pending.emit_thread_queue_update {
+        if let Some(state_db) = pending.thread_queue_state_db {
+            send_thread_queue_snapshot_notification(outgoing, conversation_id, &state_db).await;
+        } else {
+            tracing::warn!(
+                thread_id = %conversation_id,
+                "state db unavailable when reading thread queue for running thread resume"
             );
         }
     }

@@ -9,9 +9,13 @@ use super::Thread;
 use super::ThreadSource;
 use super::Turn;
 use super::TurnEnvironmentParams;
+use super::TurnStartParams;
+use super::UserInput;
 use super::shared::v2_enum_from_core;
 use codex_experimental_api_macros::ExperimentalApi;
+use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
+use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::ThreadGoalStatus as CoreThreadGoalStatus;
@@ -631,6 +635,170 @@ pub struct ThreadGoalClearParams {
 #[ts(export_to = "v2/")]
 pub struct ThreadGoalClearResponse {
     pub cleared: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct QueuedTurn {
+    pub id: String,
+    pub turn_start_params: QueuedTurnStartParams,
+    pub created_at: i64,
+    pub queue_order: i64,
+    pub last_dispatch_error: Option<String>,
+}
+
+#[derive(
+    Serialize, Deserialize, Debug, Default, Clone, PartialEq, JsonSchema, TS, ExperimentalApi,
+)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct QueuedTurnStartParams {
+    pub input: Vec<UserInput>,
+    #[experimental("thread/queue/add.responsesapiClientMetadata")]
+    #[ts(optional = nullable)]
+    pub responsesapi_client_metadata: Option<HashMap<String, String>>,
+    #[experimental("thread/queue/add.environments")]
+    #[ts(optional = nullable)]
+    pub environments: Option<Vec<TurnEnvironmentParams>>,
+    #[ts(optional = nullable)]
+    pub cwd: Option<PathBuf>,
+    #[experimental(nested)]
+    #[ts(optional = nullable)]
+    pub approval_policy: Option<AskForApproval>,
+    #[ts(optional = nullable)]
+    pub approvals_reviewer: Option<ApprovalsReviewer>,
+    #[ts(optional = nullable)]
+    pub sandbox_policy: Option<SandboxPolicy>,
+    #[experimental("thread/queue/add.permissions")]
+    #[ts(optional = nullable)]
+    pub permissions: Option<PermissionProfileSelectionParams>,
+    #[ts(optional = nullable)]
+    pub model: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(optional = nullable)]
+    pub service_tier: Option<Option<String>>,
+    #[ts(optional = nullable)]
+    pub effort: Option<ReasoningEffort>,
+    #[ts(optional = nullable)]
+    pub summary: Option<ReasoningSummary>,
+    #[ts(optional = nullable)]
+    pub personality: Option<Personality>,
+    #[ts(optional = nullable)]
+    pub output_schema: Option<JsonValue>,
+    #[experimental("thread/queue/add.collaborationMode")]
+    #[ts(optional = nullable)]
+    pub collaboration_mode: Option<CollaborationMode>,
+}
+
+impl QueuedTurnStartParams {
+    pub fn into_turn_start_params(self, thread_id: String) -> TurnStartParams {
+        TurnStartParams {
+            thread_id,
+            input: self.input,
+            responsesapi_client_metadata: self.responsesapi_client_metadata,
+            environments: self.environments,
+            cwd: self.cwd,
+            approval_policy: self.approval_policy,
+            approvals_reviewer: self.approvals_reviewer,
+            sandbox_policy: self.sandbox_policy,
+            permissions: self.permissions,
+            model: self.model,
+            service_tier: self.service_tier,
+            effort: self.effort,
+            summary: self.summary,
+            personality: self.personality,
+            output_schema: self.output_schema,
+            collaboration_mode: self.collaboration_mode,
+        }
+    }
+}
+
+impl From<TurnStartParams> for QueuedTurnStartParams {
+    fn from(value: TurnStartParams) -> Self {
+        Self {
+            input: value.input,
+            responsesapi_client_metadata: value.responsesapi_client_metadata,
+            environments: value.environments,
+            cwd: value.cwd,
+            approval_policy: value.approval_policy,
+            approvals_reviewer: value.approvals_reviewer,
+            sandbox_policy: value.sandbox_policy,
+            permissions: value.permissions,
+            model: value.model,
+            service_tier: value.service_tier,
+            effort: value.effort,
+            summary: value.summary,
+            personality: value.personality,
+            output_schema: value.output_schema,
+            collaboration_mode: value.collaboration_mode,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadQueueAddParams {
+    pub thread_id: String,
+    #[experimental(nested)]
+    pub turn_start_params: QueuedTurnStartParams,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadQueueAddResponse {
+    pub queued_turn: QueuedTurn,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadQueueListParams {
+    pub thread_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadQueueListResponse {
+    pub queued_turns: Vec<QueuedTurn>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadQueueDeleteParams {
+    pub thread_id: String,
+    pub queued_turn_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadQueueDeleteResponse {
+    pub deleted: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadQueueReorderParams {
+    pub thread_id: String,
+    pub queued_turn_ids: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadQueueReorderResponse {
+    pub queued_turns: Vec<QueuedTurn>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

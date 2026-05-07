@@ -9792,6 +9792,130 @@
       },
       "type": "object"
     },
+    "QueuedTurn": {
+      "properties": {
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "lastDispatchError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "queueOrder": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "turnStartParams": {
+          "$ref": "#/definitions/QueuedTurnStartParams"
+        }
+      },
+      "required": [
+        "createdAt",
+        "id",
+        "queueOrder",
+        "turnStartParams"
+      ],
+      "type": "object"
+    },
+    "QueuedTurnStartParams": {
+      "properties": {
+        "approvalPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AskForApproval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "approvalsReviewer": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ApprovalsReviewer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input": {
+          "items": {
+            "$ref": "#/definitions/UserInput"
+          },
+          "type": "array"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outputSchema": true,
+        "personality": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Personality"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sandboxPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SandboxPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "serviceTier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "input"
+      ],
+      "type": "object"
+    },
     "RateLimitReachedType": {
       "enum": [
         "rate_limit_reached",
@@ -11481,6 +11605,26 @@
             "params"
           ],
           "title": "Thread/goal/clearedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "thread/queue/changed"
+              ],
+              "title": "Thread/queue/changedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadQueueChangedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Thread/queue/changedNotification",
           "type": "object"
         },
         {
@@ -14658,6 +14802,26 @@
         "threadId"
       ],
       "title": "ThreadNameUpdatedNotification",
+      "type": "object"
+    },
+    "ThreadQueueChangedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "queuedTurns": {
+          "items": {
+            "$ref": "#/definitions/QueuedTurn"
+          },
+          "type": "array"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "queuedTurns",
+        "threadId"
+      ],
+      "title": "ThreadQueueChangedNotification",
       "type": "object"
     },
     "ThreadReadParams": {

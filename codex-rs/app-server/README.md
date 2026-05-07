@@ -158,6 +158,11 @@ Example with notification opt-out:
 - `thread/goal/clear` — clear the current persisted goal for a materialized thread; returns whether a goal was removed and emits `thread/goal/cleared` when state changes.
 - `thread/goal/updated` — notification emitted whenever a thread goal changes; includes the full current goal.
 - `thread/goal/cleared` — notification emitted whenever a thread goal is removed.
+- `thread/queue/add` — experimental; append one future `turn/start` payload to a materialized thread queue and emit `thread/queue/changed`.
+- `thread/queue/list` — experimental; read the current queued turns for a materialized thread.
+- `thread/queue/delete` — experimental; remove one queued turn by id and emit `thread/queue/changed` when state changes.
+- `thread/queue/reorder` — experimental; replace the queued-turn order with the supplied ids and emit `thread/queue/changed`.
+- `thread/queue/changed` — experimental notification emitted whenever the queued-turn list changes; includes the full ordered queue snapshot.
 - `thread/status/changed` — notification emitted when a loaded thread’s status changes (`threadId` + new `status`).
 - `thread/archive` — move a thread’s rollout file into the archived directory and attempt to move any spawned descendant thread rollout files; returns `{}` on success and emits `thread/archived` for each archived thread.
 - `thread/unsubscribe` — unsubscribe this connection from thread turn/item events. If this was the last subscriber, the server keeps the thread loaded and unloads it only after it has had no subscribers and no thread activity for 30 minutes, then emits `thread/closed`.
@@ -549,6 +554,40 @@ Use `thread/goal/clear` to remove the current goal.
 { "method": "thread/goal/clear", "id": 30, "params": { "threadId": "thr_123" } }
 { "id": 30, "result": { "cleared": true } }
 { "method": "thread/goal/cleared", "params": { "threadId": "thr_123" } }
+```
+
+### Example: Queue a follow-up turn
+
+Use `thread/queue/add` to persist a future turn for a materialized thread. App-server stores the same normalized inputs that `turn/start` accepts, starts the head queued turn after the active turn reaches a terminal state, and emits the full queue snapshot whenever the queue changes.
+
+```json
+{ "method": "thread/queue/add", "id": 31, "params": {
+    "threadId": "thr_123",
+    "turnStartParams": {
+        "input": [{ "type": "text", "text": "Run the smoke tests", "textElements": [] }]
+    }
+} }
+{ "id": 31, "result": { "queuedTurn": {
+    "id": "queued_123",
+    "turnStartParams": {
+        "input": [{ "type": "text", "text": "Run the smoke tests", "textElements": [] }]
+    },
+    "createdAt": 1776272500,
+    "queueOrder": 0,
+    "lastDispatchError": null
+} } }
+{ "method": "thread/queue/changed", "params": {
+    "threadId": "thr_123",
+    "queuedTurns": [{
+        "id": "queued_123",
+        "turnStartParams": {
+            "input": [{ "type": "text", "text": "Run the smoke tests", "textElements": [] }]
+        },
+        "createdAt": 1776272500,
+        "queueOrder": 0,
+        "lastDispatchError": null
+    }]
+} }
 ```
 
 ### Example: Archive a thread

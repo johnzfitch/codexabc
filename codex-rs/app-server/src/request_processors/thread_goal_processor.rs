@@ -305,7 +305,7 @@ impl ThreadGoalRequestProcessor {
         Ok(())
     }
 
-    async fn state_db_for_materialized_thread(
+    pub(super) async fn state_db_for_materialized_thread(
         &self,
         thread_id: ThreadId,
     ) -> Result<StateDbHandle, JSONRPCErrorError> {
