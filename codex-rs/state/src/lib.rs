@@ -16,7 +16,7 @@ pub use model::LogEntry;
 pub use model::LogQuery;
 pub use model::LogRow;
 pub use model::Phase2JobClaimOutcome;
-/// Preferred entrypoint: owns configuration and metrics.
+/// Preferred entrypoint: owns SQLite configuration and optional metrics injection.
 pub use runtime::StateRuntime;
 
 /// Low-level storage engine: useful for focused tests.
@@ -57,6 +57,8 @@ pub use runtime::logs_db_filename;
 pub use runtime::logs_db_path;
 pub use runtime::state_db_filename;
 pub use runtime::state_db_path;
+pub use telemetry::DbMetricsRecorder;
+pub use telemetry::DbMetricsRecorderHandle;
 
 /// Environment variable for overriding the SQLite state database home directory.
 pub const SQLITE_HOME_ENV: &str = "CODEX_SQLITE_HOME";
@@ -85,19 +87,18 @@ pub const DB_FALLBACK_METRIC: &str = "codex.db.fallback";
 /// SQLite log queue loss or flush failure. Tags: [event, reason]
 pub const DB_LOG_QUEUE_METRIC: &str = "codex.db.log_queue";
 
-pub fn record_db_fallback_metric(caller: &'static str, reason: &'static str) {
-    telemetry::record_fallback(caller, reason);
+pub fn record_db_fallback_metric(
+    metrics: Option<&dyn DbMetricsRecorder>,
+    caller: &'static str,
+    reason: &'static str,
+) {
+    telemetry::record_fallback(metrics, caller, reason);
 }
 
 pub fn record_db_init_backfill_gate_metric(
+    metrics: Option<&dyn DbMetricsRecorder>,
     duration: std::time::Duration,
     result: &anyhow::Result<()>,
 ) {
-    telemetry::record_init_result(
-        codex_otel::global().as_ref(),
-        telemetry::DbKind::None,
-        "backfill_gate",
-        duration,
-        result,
-    );
+    telemetry::record_init_backfill_gate(metrics, duration, result);
 }

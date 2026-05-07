@@ -8,7 +8,6 @@ license.workspace = true
 anyhow = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
-codex-otel = { workspace = true }
 codex-protocol = { workspace = true }
 dirs = { workspace = true }
 log = { workspace = true }
@@ -24,11 +23,6 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 codex-git-utils = { workspace = true }
-opentelemetry = { workspace = true }
-opentelemetry_sdk = { workspace = true, features = [
-    "experimental_metrics_custom_reader",
-    "testing",
-] }
 pretty_assertions = { workspace = true }
 
 [lints]

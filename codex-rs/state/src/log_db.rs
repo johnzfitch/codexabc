@@ -95,7 +95,7 @@ where
 pub struct LogDbLayer {
     sender: mpsc::Sender<LogDbCommand>,
     process_uuid: String,
-    metrics: Option<codex_otel::MetricsClient>,
+    metrics: Option<crate::DbMetricsRecorderHandle>,
 }
 
 pub fn start(state_db: std::sync::Arc<StateRuntime>) -> LogDbLayer {
@@ -123,7 +123,7 @@ impl LogDbLayer {
     ) -> Self {
         let config = config.normalized();
         let (sender, receiver) = mpsc::channel(config.queue_capacity);
-        let metrics = state_db.metrics().cloned();
+        let metrics = state_db.metrics_handle();
         tokio::spawn(run_inserter(state_db, receiver, config));
         Self {
             sender,
@@ -135,11 +135,11 @@ impl LogDbLayer {
     pub async fn flush(&self) {
         let (tx, rx) = oneshot::channel();
         if self.sender.send(LogDbCommand::Flush(tx)).await.is_err() {
-            telemetry::record_log_queue(self.metrics.as_ref(), "flush_failed", "closed");
+            telemetry::record_log_queue(self.metrics.as_deref(), "flush_failed", "closed");
             return;
         }
         if rx.await.is_err() {
-            telemetry::record_log_queue(self.metrics.as_ref(), "flush_failed", "closed");
+            telemetry::record_log_queue(self.metrics.as_deref(), "flush_failed", "closed");
         }
     }
 
@@ -149,7 +149,7 @@ impl LogDbLayer {
                 mpsc::error::TrySendError::Full(_) => "full",
                 mpsc::error::TrySendError::Closed(_) => "closed",
             };
-            telemetry::record_log_queue(self.metrics.as_ref(), "dropped", reason);
+            telemetry::record_log_queue(self.metrics.as_deref(), "dropped", reason);
         }
     }
 }

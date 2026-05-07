@@ -29,9 +29,10 @@ use crate::model::epoch_millis_to_datetime;
 use crate::paths::file_modified_time_utc;
 use crate::telemetry::DbAccess;
 use crate::telemetry::DbKind;
+use crate::telemetry::DbMetricsRecorder;
+use crate::telemetry::DbMetricsRecorderHandle;
 use chrono::DateTime;
 use chrono::Utc;
-use codex_otel::MetricsClient;
 use codex_protocol::ThreadId;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::protocol::RolloutItem;
@@ -63,6 +64,8 @@ mod backfill;
 mod goals;
 mod logs;
 mod memories;
+#[cfg(test)]
+mod metrics_tests;
 mod remote_control;
 #[cfg(test)]
 mod test_support;
@@ -90,7 +93,7 @@ pub struct StateRuntime {
     pool: Arc<sqlx::SqlitePool>,
     logs_pool: Arc<sqlx::SqlitePool>,
     thread_updated_at_millis: Arc<AtomicI64>,
-    metrics: Option<MetricsClient>,
+    metrics: Option<DbMetricsRecorderHandle>,
 }
 
 impl StateRuntime {
@@ -98,23 +101,24 @@ impl StateRuntime {
     ///
     /// This opens (and migrates) the SQLite databases under `codex_home`,
     /// keeping logs in a dedicated file to reduce lock contention with the
-    /// rest of the state store.
+    /// rest of the state store. Use [`Self::init_with_metrics`] when the caller
+    /// has a metrics sink to attach.
     pub async fn init(codex_home: PathBuf, default_provider: String) -> anyhow::Result<Arc<Self>> {
-        Self::init_with_metrics(codex_home, default_provider, codex_otel::global()).await
+        Self::init_with_metrics(codex_home, default_provider, None).await
     }
 
     /// Initialize the state runtime with an explicit metrics client.
     pub async fn init_with_metrics(
         codex_home: PathBuf,
         default_provider: String,
-        metrics: Option<MetricsClient>,
+        metrics: Option<DbMetricsRecorderHandle>,
     ) -> anyhow::Result<Arc<Self>> {
         let started = Instant::now();
         let create_dir_result = tokio::fs::create_dir_all(&codex_home)
             .await
             .map_err(anyhow::Error::from);
         crate::telemetry::record_init_result(
-            metrics.as_ref(),
+            metrics.as_deref(),
             DbKind::None,
             "create_dir",
             started.elapsed(),
@@ -141,14 +145,15 @@ impl StateRuntime {
         .await;
         let state_path = state_db_path(codex_home.as_path());
         let logs_path = logs_db_path(codex_home.as_path());
-        let pool = match open_state_sqlite(&state_path, &state_migrator, metrics.as_ref()).await {
+        let pool = match open_state_sqlite(&state_path, &state_migrator, metrics.as_deref()).await {
             Ok(db) => Arc::new(db),
             Err(err) => {
                 warn!("failed to open state db at {}: {err}", state_path.display());
                 return Err(err);
             }
         };
-        let logs_pool = match open_logs_sqlite(&logs_path, &logs_migrator, metrics.as_ref()).await {
+        let logs_pool = match open_logs_sqlite(&logs_path, &logs_migrator, metrics.as_deref()).await
+        {
             Ok(db) => Arc::new(db),
             Err(err) => {
                 warn!("failed to open logs db at {}: {err}", logs_path.display());
@@ -162,7 +167,7 @@ impl StateRuntime {
                 .await
                 .map_err(anyhow::Error::from);
         crate::telemetry::record_init_result(
-            metrics.as_ref(),
+            metrics.as_deref(),
             DbKind::State,
             "post_init_query",
             started.elapsed(),
@@ -192,8 +197,12 @@ impl StateRuntime {
         self.codex_home.as_path()
     }
 
-    pub(crate) fn metrics(&self) -> Option<&MetricsClient> {
-        self.metrics.as_ref()
+    pub(crate) fn metrics(&self) -> Option<&dyn DbMetricsRecorder> {
+        self.metrics.as_deref()
+    }
+
+    pub(crate) fn metrics_handle(&self) -> Option<DbMetricsRecorderHandle> {
+        self.metrics.clone()
     }
 
     pub(crate) async fn record_db_operation<T, F>(
@@ -224,45 +233,45 @@ fn base_sqlite_options(path: &Path) -> SqliteConnectOptions {
 async fn open_state_sqlite(
     path: &Path,
     migrator: &Migrator,
-    metrics: Option<&MetricsClient>,
+    metrics: Option<&dyn DbMetricsRecorder>,
 ) -> anyhow::Result<SqlitePool> {
     // New state DBs should use incremental auto-vacuum, but retrofitting an
     // existing DB requires a full VACUUM. Do not attempt that during process
     // startup: it is maintenance work that can contend with foreground writers.
-    let options = base_sqlite_options(path).auto_vacuum(SqliteAutoVacuum::Incremental);
-    let started = Instant::now();
-    let pool_result = SqlitePoolOptions::new()
-        .max_connections(5)
-        .acquire_slow_level(LevelFilter::Warn)
-        .acquire_slow_threshold(Duration::from_millis(250))
-        .connect_with(options)
-        .await
-        .map_err(anyhow::Error::from);
-    crate::telemetry::record_init_result(
+    open_sqlite(
+        path,
+        migrator,
         metrics,
         DbKind::State,
         "open_state",
-        started.elapsed(),
-        &pool_result,
-    );
-    let pool = pool_result?;
-    let started = Instant::now();
-    let migrate_result = migrator.run(&pool).await.map_err(anyhow::Error::from);
-    crate::telemetry::record_init_result(
-        metrics,
-        DbKind::State,
         "migrate_state",
-        started.elapsed(),
-        &migrate_result,
-    );
-    migrate_result?;
-    Ok(pool)
+    )
+    .await
 }
 
 async fn open_logs_sqlite(
     path: &Path,
     migrator: &Migrator,
-    metrics: Option<&MetricsClient>,
+    metrics: Option<&dyn DbMetricsRecorder>,
+) -> anyhow::Result<SqlitePool> {
+    open_sqlite(
+        path,
+        migrator,
+        metrics,
+        DbKind::Logs,
+        "open_logs",
+        "migrate_logs",
+    )
+    .await
+}
+
+async fn open_sqlite(
+    path: &Path,
+    migrator: &Migrator,
+    metrics: Option<&dyn DbMetricsRecorder>,
+    db: DbKind,
+    open_phase: &'static str,
+    migrate_phase: &'static str,
 ) -> anyhow::Result<SqlitePool> {
     let options = base_sqlite_options(path).auto_vacuum(SqliteAutoVacuum::Incremental);
     let started = Instant::now();
@@ -273,20 +282,14 @@ async fn open_logs_sqlite(
         .connect_with(options)
         .await
         .map_err(anyhow::Error::from);
-    crate::telemetry::record_init_result(
-        metrics,
-        DbKind::Logs,
-        "open_logs",
-        started.elapsed(),
-        &pool_result,
-    );
+    crate::telemetry::record_init_result(metrics, db, open_phase, started.elapsed(), &pool_result);
     let pool = pool_result?;
     let started = Instant::now();
     let migrate_result = migrator.run(&pool).await.map_err(anyhow::Error::from);
     crate::telemetry::record_init_result(
         metrics,
-        DbKind::Logs,
-        "migrate_logs",
+        db,
+        migrate_phase,
         started.elapsed(),
         &migrate_result,
     );
@@ -465,176 +468,5 @@ mod tests {
         tolerant_pool.close().await;
 
         let _ = tokio::fs::remove_dir_all(codex_home).await;
-    }
-
-    mod metrics_tests {
-        use super::super::StateRuntime;
-        use super::unique_temp_dir;
-        use crate::DB_INIT_METRIC;
-        use crate::DB_OPERATION_METRIC;
-        use crate::telemetry::DbAccess;
-        use crate::telemetry::DbKind;
-        use codex_otel::MetricsClient;
-        use codex_otel::MetricsConfig;
-        use opentelemetry::KeyValue;
-        use opentelemetry_sdk::metrics::InMemoryMetricExporter;
-        use opentelemetry_sdk::metrics::data::AggregatedMetrics;
-        use opentelemetry_sdk::metrics::data::MetricData;
-        use pretty_assertions::assert_eq;
-        use std::collections::BTreeMap;
-
-        fn build_metrics() -> MetricsClient {
-            let exporter = InMemoryMetricExporter::default();
-            let config = MetricsConfig::in_memory(
-                "test",
-                "codex-state",
-                env!("CARGO_PKG_VERSION"),
-                exporter,
-            )
-            .with_runtime_reader();
-            MetricsClient::new(config).expect("metrics client")
-        }
-
-        fn metric_points(metrics: &MetricsClient, name: &str) -> Vec<BTreeMap<String, String>> {
-            let snapshot = metrics.snapshot().expect("metrics snapshot");
-            for scope_metrics in snapshot.scope_metrics() {
-                for metric in scope_metrics.metrics() {
-                    if metric.name() != name {
-                        continue;
-                    }
-                    return match metric.data() {
-                        AggregatedMetrics::U64(data) => match data {
-                            MetricData::Sum(sum) => sum
-                                .data_points()
-                                .map(|point| attributes_to_map(point.attributes()))
-                                .collect(),
-                            _ => panic!("unexpected counter aggregation"),
-                        },
-                        _ => panic!("unexpected metric data type"),
-                    };
-                }
-            }
-            panic!("metric {name} missing");
-        }
-
-        fn attributes_to_map<'a>(
-            attributes: impl Iterator<Item = &'a KeyValue>,
-        ) -> BTreeMap<String, String> {
-            attributes
-                .map(|kv| (kv.key.as_str().to_string(), kv.value.as_str().to_string()))
-                .collect()
-        }
-
-        fn find_point(
-            points: &[BTreeMap<String, String>],
-            key: &str,
-            value: &str,
-        ) -> BTreeMap<String, String> {
-            points
-                .iter()
-                .find(|attrs| attrs.get(key).is_some_and(|actual| actual == value))
-                .cloned()
-                .unwrap_or_else(|| panic!("missing point with {key}={value}: {points:?}"))
-        }
-
-        #[tokio::test]
-        async fn init_records_success_metrics() {
-            let metrics = build_metrics();
-            let codex_home = unique_temp_dir();
-            let runtime = StateRuntime::init_with_metrics(
-                codex_home.clone(),
-                "test-provider".to_string(),
-                Some(metrics.clone()),
-            )
-            .await
-            .expect("initialize runtime");
-
-            let points = metric_points(&metrics, DB_INIT_METRIC);
-            let open_state = find_point(&points, "phase", "open_state");
-            assert_eq!(
-                open_state.get("status").map(String::as_str),
-                Some("success")
-            );
-            assert_eq!(open_state.get("db").map(String::as_str), Some("state"));
-            assert_eq!(
-                open_state.get("error_class").map(String::as_str),
-                Some("none")
-            );
-            assert_eq!(
-                open_state.get("sqlite_code").map(String::as_str),
-                Some("none")
-            );
-
-            runtime.pool.close().await;
-            runtime.logs_pool.close().await;
-            let _ = tokio::fs::remove_dir_all(codex_home).await;
-        }
-
-        #[tokio::test]
-        async fn selected_operations_record_success_metrics() {
-            let metrics = build_metrics();
-            let codex_home = unique_temp_dir();
-            let runtime = StateRuntime::init_with_metrics(
-                codex_home.clone(),
-                "test-provider".to_string(),
-                Some(metrics.clone()),
-            )
-            .await
-            .expect("initialize runtime");
-
-            runtime
-                .get_backfill_state()
-                .await
-                .expect("get backfill state");
-            runtime
-                .checkpoint_backfill("sessions/test/rollout.jsonl")
-                .await
-                .expect("checkpoint backfill");
-
-            let points = metric_points(&metrics, DB_OPERATION_METRIC);
-            let read = find_point(&points, "operation", "get_backfill_state");
-            assert_eq!(read.get("status").map(String::as_str), Some("success"));
-            assert_eq!(read.get("access").map(String::as_str), Some("read"));
-            let write = find_point(&points, "operation", "checkpoint_backfill");
-            assert_eq!(write.get("status").map(String::as_str), Some("success"));
-            assert_eq!(write.get("access").map(String::as_str), Some("write"));
-
-            runtime.pool.close().await;
-            runtime.logs_pool.close().await;
-            let _ = tokio::fs::remove_dir_all(codex_home).await;
-        }
-
-        #[tokio::test]
-        async fn failed_operation_records_classified_error_tags() {
-            let metrics = build_metrics();
-            let codex_home = unique_temp_dir();
-            let runtime = StateRuntime::init_with_metrics(
-                codex_home.clone(),
-                "test-provider".to_string(),
-                Some(metrics.clone()),
-            )
-            .await
-            .expect("initialize runtime");
-
-            let result: anyhow::Result<()> = runtime
-                .record_db_operation(DbKind::State, "test_failure", DbAccess::Read, async {
-                    Err(anyhow::Error::new(sqlx::Error::PoolTimedOut))
-                })
-                .await;
-            assert!(result.is_err());
-
-            let points = metric_points(&metrics, DB_OPERATION_METRIC);
-            let failure = find_point(&points, "operation", "test_failure");
-            assert_eq!(failure.get("status").map(String::as_str), Some("failed"));
-            assert_eq!(
-                failure.get("error_class").map(String::as_str),
-                Some("pool_timeout")
-            );
-            assert_eq!(failure.get("sqlite_code").map(String::as_str), Some("none"));
-
-            runtime.pool.close().await;
-            runtime.logs_pool.close().await;
-            let _ = tokio::fs::remove_dir_all(codex_home).await;
-        }
     }
 }

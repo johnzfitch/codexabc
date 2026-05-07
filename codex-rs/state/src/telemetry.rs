@@ -1,9 +1,8 @@
 use std::borrow::Cow;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
-
-use codex_otel::MetricsClient;
 
 use crate::DB_FALLBACK_METRIC;
 use crate::DB_INIT_DURATION_METRIC;
@@ -11,6 +10,21 @@ use crate::DB_INIT_METRIC;
 use crate::DB_LOG_QUEUE_METRIC;
 use crate::DB_OPERATION_DURATION_METRIC;
 use crate::DB_OPERATION_METRIC;
+
+/// Low-cardinality metrics sink used by the SQLite state runtime.
+///
+/// Implementations should ignore recording errors locally. Database operations
+/// must never fail because telemetry delivery failed.
+pub trait DbMetricsRecorder: Send + Sync + 'static {
+    /// Increment a counter metric by `inc` with low-cardinality tags.
+    fn counter(&self, name: &str, inc: i64, tags: &[(&str, &str)]);
+
+    /// Record an elapsed duration metric with low-cardinality tags.
+    fn record_duration(&self, name: &str, duration: Duration, tags: &[(&str, &str)]);
+}
+
+/// Shared recorder handle stored by `StateRuntime` and cloned by log layers.
+pub type DbMetricsRecorderHandle = Arc<dyn DbMetricsRecorder>;
 
 #[derive(Clone, Copy)]
 pub(crate) enum DbKind {
@@ -62,7 +76,7 @@ impl DbErrorTags {
 }
 
 pub(crate) async fn record_operation<T, F>(
-    metrics: Option<&MetricsClient>,
+    metrics: Option<&dyn DbMetricsRecorder>,
     db: DbKind,
     operation: &'static str,
     access: DbAccess,
@@ -78,7 +92,7 @@ where
 }
 
 pub(crate) fn record_init_result<T>(
-    metrics: Option<&MetricsClient>,
+    metrics: Option<&dyn DbMetricsRecorder>,
     db: DbKind,
     phase: &'static str,
     duration: Duration,
@@ -101,13 +115,25 @@ pub(crate) fn record_init_result<T>(
     record_duration(metrics, DB_INIT_DURATION_METRIC, duration, &tags);
 }
 
-pub(crate) fn record_fallback(caller: &'static str, reason: &'static str) {
+pub fn record_fallback(
+    metrics: Option<&dyn DbMetricsRecorder>,
+    caller: &'static str,
+    reason: &'static str,
+) {
     let tags = [("caller", caller), ("reason", reason)];
-    record_counter(codex_otel::global().as_ref(), DB_FALLBACK_METRIC, &tags);
+    record_counter(metrics, DB_FALLBACK_METRIC, &tags);
+}
+
+pub fn record_init_backfill_gate(
+    metrics: Option<&dyn DbMetricsRecorder>,
+    duration: Duration,
+    result: &anyhow::Result<()>,
+) {
+    record_init_result(metrics, DbKind::None, "backfill_gate", duration, result);
 }
 
 pub(crate) fn record_log_queue(
-    metrics: Option<&MetricsClient>,
+    metrics: Option<&dyn DbMetricsRecorder>,
     event: &'static str,
     reason: &'static str,
 ) {
@@ -166,7 +192,7 @@ pub(crate) fn classify_sqlite_code(code: &str) -> &'static str {
 }
 
 fn record_operation_result<T>(
-    metrics: Option<&MetricsClient>,
+    metrics: Option<&dyn DbMetricsRecorder>,
     db: DbKind,
     operation: &'static str,
     access: DbAccess,
@@ -228,20 +254,20 @@ fn classify_sqlx_error(err: &sqlx::Error) -> DbErrorTags {
     }
 }
 
-fn record_counter(metrics: Option<&MetricsClient>, name: &str, tags: &[(&str, &str)]) {
+fn record_counter(metrics: Option<&dyn DbMetricsRecorder>, name: &str, tags: &[(&str, &str)]) {
     if let Some(metrics) = metrics {
-        let _ = metrics.counter(name, /*inc*/ 1, tags);
+        metrics.counter(name, /*inc*/ 1, tags);
     }
 }
 
 fn record_duration(
-    metrics: Option<&MetricsClient>,
+    metrics: Option<&dyn DbMetricsRecorder>,
     name: &str,
     duration: Duration,
     tags: &[(&str, &str)],
 ) {
     if let Some(metrics) = metrics {
-        let _ = metrics.record_duration(name, duration, tags);
+        metrics.record_duration(name, duration, tags);
     }
 }
 

@@ -1279,7 +1279,7 @@ async fn find_thread_path_by_id_str_in_subdir(
                     tracing::warn!(
                         "state db discrepancy during find_thread_path_by_id_str_in_subdir: mismatched_db_path"
                     );
-                    codex_state::record_db_fallback_metric("find_thread_path", "mismatch");
+                    crate::sqlite_metrics::record_fallback("find_thread_path", "mismatch");
                 }
                 Err(err) => {
                     tracing::debug!(
@@ -1297,7 +1297,7 @@ async fn find_thread_path_by_id_str_in_subdir(
             tracing::warn!(
                 "state db discrepancy during find_thread_path_by_id_str_in_subdir: stale_db_path"
             );
-            codex_state::record_db_fallback_metric("find_thread_path", "stale_path");
+            crate::sqlite_metrics::record_fallback("find_thread_path", "stale_path");
         }
     }
 
@@ -1330,7 +1330,7 @@ async fn find_thread_path_by_id_str_in_subdir(
         } else {
             "db_unavailable"
         };
-        codex_state::record_db_fallback_metric("find_thread_path", reason);
+        crate::sqlite_metrics::record_fallback("find_thread_path", reason);
         state_db::read_repair_rollout_path(
             state_db_ctx,
             thread_id,
