@@ -5,6 +5,8 @@ use std::any::Any;
 use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
 use crate::CreateThreadParams;
+use crate::ListThreadTurnItemsParams;
+use crate::ListThreadTurnsParams;
 use crate::ListThreadsParams;
 use crate::LoadThreadHistoryParams;
 use crate::ReadThreadByRolloutPathParams;
@@ -13,7 +15,10 @@ use crate::ResumeThreadParams;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::ThreadPage;
+use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
+use crate::ThreadTurnItemsPage;
+use crate::ThreadTurnPage;
 use crate::UpdateThreadMetadataParams;
 
 /// Storage-neutral thread persistence boundary.
@@ -66,6 +71,26 @@ pub trait ThreadStore: Any + Send + Sync {
 
     /// Lists stored threads matching the supplied filters.
     async fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreResult<ThreadPage>;
+
+    /// Lists turns within a stored thread.
+    async fn list_thread_turns(
+        &self,
+        _params: ListThreadTurnsParams,
+    ) -> ThreadStoreResult<ThreadTurnPage> {
+        Err(ThreadStoreError::Unsupported {
+            operation: "list_thread_turns",
+        })
+    }
+
+    /// Lists persisted items within a stored turn.
+    async fn list_thread_turn_items(
+        &self,
+        _params: ListThreadTurnItemsParams,
+    ) -> ThreadStoreResult<ThreadTurnItemsPage> {
+        Err(ThreadStoreError::Unsupported {
+            operation: "list_thread_turn_items",
+        })
+    }
 
     /// Applies a mutable metadata patch and returns the updated thread.
     async fn update_thread_metadata(

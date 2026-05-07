@@ -28,11 +28,67 @@ use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 use crate::UpdateThreadMetadataParams;
 
+#[cfg(test)]
+use crate::ListThreadTurnItemsParams;
+#[cfg(test)]
+use crate::ListThreadTurnsParams;
+#[cfg(test)]
+use crate::SortDirection;
+#[cfg(test)]
+use crate::StoredTurnItemsView;
+
 static IN_MEMORY_THREAD_STORES: OnceLock<Mutex<HashMap<String, Arc<InMemoryThreadStore>>>> =
     OnceLock::new();
 
 fn stores() -> &'static Mutex<HashMap<String, Arc<InMemoryThreadStore>>> {
     IN_MEMORY_THREAD_STORES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn default_turn_pagination_methods_return_unsupported() {
+        let store = InMemoryThreadStore::default();
+        let thread_id = ThreadId::default();
+
+        let turns_err = store
+            .list_thread_turns(ListThreadTurnsParams {
+                thread_id,
+                include_archived: true,
+                cursor: None,
+                page_size: 10,
+                sort_direction: SortDirection::Asc,
+                items_view: StoredTurnItemsView::Summary,
+            })
+            .await
+            .expect_err("default list_thread_turns should be unsupported");
+        assert!(matches!(
+            turns_err,
+            ThreadStoreError::Unsupported {
+                operation: "list_thread_turns"
+            }
+        ));
+
+        let items_err = store
+            .list_thread_turn_items(ListThreadTurnItemsParams {
+                thread_id,
+                turn_id: "turn_1".to_string(),
+                include_archived: true,
+                cursor: None,
+                page_size: 10,
+                sort_direction: SortDirection::Asc,
+            })
+            .await
+            .expect_err("default list_thread_turn_items should be unsupported");
+        assert!(matches!(
+            items_err,
+            ThreadStoreError::Unsupported {
+                operation: "list_thread_turn_items"
+            }
+        ));
+    }
 }
 
 fn stores_guard() -> MutexGuard<'static, HashMap<String, Arc<InMemoryThreadStore>>> {
