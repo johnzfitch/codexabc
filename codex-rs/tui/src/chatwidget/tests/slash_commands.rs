@@ -2108,6 +2108,36 @@ async fn queued_upload_without_args_keeps_draining() {
 }
 
 #[tokio::test]
+async fn queued_upload_with_only_whitespace_keeps_draining() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    handle_turn_started(&mut chat, "turn-1");
+
+    queue_composer_text_with_tab(&mut chat, "/upload   ");
+    queue_composer_text_with_tab(&mut chat, "after upload help");
+
+    complete_turn_with_message(&mut chat, "turn-1", Some("done"));
+
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AppEvent::UploadLocalFile { .. })),
+        "whitespace-only queued /upload should not start an upload; events: {events:?}"
+    );
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => assert_eq!(
+            items,
+            vec![UserInput::Text {
+                text: "after upload help".to_string(),
+                text_elements: Vec::new(),
+            }]
+        ),
+        other => panic!("expected follow-up prompt after whitespace-only /upload, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn user_turn_sends_standard_override_after_fast_is_turned_off() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
     chat.thread_id = Some(ThreadId::new());

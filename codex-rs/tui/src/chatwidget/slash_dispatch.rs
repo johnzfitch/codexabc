@@ -860,6 +860,10 @@ impl ChatWidget {
         let trimmed_start = rest.trim_start();
         let leading_trimmed = rest.len().saturating_sub(trimmed_start.len());
         let trimmed_rest = trimmed_start.trim_end();
+        if cmd == SlashCommand::Upload && trimmed_rest.is_empty() {
+            self.dispatch_command(cmd);
+            return QueueDrain::Continue;
+        }
         let args_elements = Self::slash_command_args_elements(
             trimmed_rest,
             rest_offset + leading_trimmed,
