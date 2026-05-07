@@ -1193,10 +1193,22 @@ impl ThreadRequestProcessor {
         developer_instructions: Option<String>,
         personality: Option<Personality>,
     ) -> ConfigOverrides {
+        let (service_tier, service_tier_id) = match service_tier {
+            Some(Some(service_tier)) => {
+                let legacy_service_tier = ServiceTier::from_request_value(&service_tier);
+                let service_tier_id = legacy_service_tier
+                    .map(|service_tier| service_tier.request_value().to_string())
+                    .unwrap_or(service_tier);
+                (Some(legacy_service_tier), Some(Some(service_tier_id)))
+            }
+            Some(None) => (Some(None), Some(None)),
+            None => (None, None),
+        };
         let mut overrides = ConfigOverrides {
             model,
             model_provider,
             service_tier,
+            service_tier_id,
             cwd: cwd.map(PathBuf::from),
             approval_policy: approval_policy
                 .map(codex_app_server_protocol::AskForApproval::to_core),
