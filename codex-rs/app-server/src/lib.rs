@@ -52,6 +52,7 @@ use codex_core::check_execpolicy_for_warnings;
 use codex_core::config::find_codex_home;
 use codex_core::init_state_db_from_config;
 use codex_exec_server::EnvironmentManager;
+use codex_exec_server::EnvironmentResolver;
 use codex_exec_server::ExecServerRuntimePaths;
 use codex_feedback::CodexFeedback;
 use codex_protocol::protocol::SessionSource;
@@ -371,15 +372,19 @@ pub enum PluginStartupTasks {
     Skip,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct AppServerRuntimeOptions {
     pub plugin_startup_tasks: PluginStartupTasks,
+    /// Optional resolver passed through to the environment manager. App-server
+    /// still uses strict environment-id lookup today.
+    pub environment_resolver: Option<Arc<dyn EnvironmentResolver>>,
 }
 
 impl Default for AppServerRuntimeOptions {
     fn default() -> Self {
         Self {
             plugin_startup_tasks: PluginStartupTasks::Start,
+            environment_resolver: None,
         }
     }
 }
@@ -417,15 +422,20 @@ pub async fn run_main_with_transport_options(
     auth: AppServerWebsocketAuthSettings,
     runtime_options: AppServerRuntimeOptions,
 ) -> IoResult<()> {
-    let environment_manager = Arc::new(
-        EnvironmentManager::new(EnvironmentManagerArgs::new(
-            ExecServerRuntimePaths::from_optional_paths(
-                arg0_paths.codex_self_exe.clone(),
-                arg0_paths.codex_linux_sandbox_exe.clone(),
-            )?,
-        ))
-        .await,
-    );
+    let AppServerRuntimeOptions {
+        plugin_startup_tasks,
+        environment_resolver,
+    } = runtime_options;
+    let mut environment_manager_args =
+        EnvironmentManagerArgs::new(ExecServerRuntimePaths::from_optional_paths(
+            arg0_paths.codex_self_exe.clone(),
+            arg0_paths.codex_linux_sandbox_exe.clone(),
+        )?);
+    if let Some(environment_resolver) = environment_resolver {
+        environment_manager_args =
+            environment_manager_args.with_environment_resolver(environment_resolver);
+    }
+    let environment_manager = Arc::new(EnvironmentManager::new(environment_manager_args).await);
     let (transport_event_tx, mut transport_event_rx) =
         mpsc::channel::<TransportEvent>(CHANNEL_CAPACITY);
     let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(CHANNEL_CAPACITY);
@@ -765,7 +775,7 @@ pub async fn run_main_with_transport_options(
             auth_manager,
             rpc_transport: analytics_rpc_transport(&transport),
             remote_control_handle: Some(remote_control_handle.clone()),
-            plugin_startup_tasks: runtime_options.plugin_startup_tasks,
+            plugin_startup_tasks,
         }));
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();
