@@ -18,7 +18,6 @@ use crate::facts::TurnStatus;
 use crate::facts::TurnSteerRejectionReason;
 use crate::facts::TurnSteerResult;
 use crate::facts::TurnSubmissionType;
-use crate::now_unix_seconds;
 use codex_app_server_protocol::CodexErrorInfo;
 use codex_app_server_protocol::CommandExecutionSource;
 use codex_login::default_client::originator;
@@ -254,43 +253,22 @@ pub struct GuardianReviewEventParams {
 }
 
 pub struct GuardianReviewTrackContext {
-    thread_id: String,
-    turn_id: String,
-    review_id: String,
-    target_item_id: Option<String>,
-    approval_request_source: GuardianApprovalRequestSource,
-    reviewed_action: GuardianReviewedAction,
-    review_timeout_ms: u64,
-    started_at: u64,
-    started_instant: Instant,
+    pub thread_id: String,
+    pub turn_id: String,
+    pub review_id: String,
+    pub target_item_id: Option<String>,
+    pub approval_request_source: GuardianApprovalRequestSource,
+    pub reviewed_action: GuardianReviewedAction,
+    pub review_timeout_ms: u64,
+    pub started_at_ms: u64,
+    pub started_instant: Instant,
 }
 
 impl GuardianReviewTrackContext {
-    pub fn new(
-        thread_id: String,
-        turn_id: String,
-        review_id: String,
-        target_item_id: Option<String>,
-        approval_request_source: GuardianApprovalRequestSource,
-        reviewed_action: GuardianReviewedAction,
-        review_timeout_ms: u64,
-    ) -> Self {
-        Self {
-            thread_id,
-            turn_id,
-            review_id,
-            target_item_id,
-            approval_request_source,
-            reviewed_action,
-            review_timeout_ms,
-            started_at: now_unix_seconds(),
-            started_instant: Instant::now(),
-        }
-    }
-
     pub(crate) fn event_params(
         &self,
         result: GuardianReviewAnalyticsResult,
+        completed_at_ms: u64,
     ) -> GuardianReviewEventParams {
         GuardianReviewEventParams {
             thread_id: self.thread_id.clone(),
@@ -316,8 +294,8 @@ impl GuardianReviewTrackContext {
             tool_call_count: None,
             time_to_first_token_ms: result.time_to_first_token_ms,
             completion_latency_ms: Some(self.started_instant.elapsed().as_millis() as u64),
-            started_at: self.started_at,
-            completed_at: Some(now_unix_seconds()),
+            started_at: self.started_at_ms / 1_000,
+            completed_at: Some(completed_at_ms / 1_000),
             input_tokens: result.token_usage.as_ref().map(|usage| usage.input_tokens),
             cached_input_tokens: result
                 .token_usage

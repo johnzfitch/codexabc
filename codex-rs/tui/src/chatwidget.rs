@@ -97,7 +97,6 @@ use codex_app_server_protocol::ConfigLayerSource;
 use codex_app_server_protocol::CreditsSnapshot;
 use codex_app_server_protocol::ErrorNotification;
 use codex_app_server_protocol::FileChangeRequestApprovalParams;
-use codex_app_server_protocol::GuardianApprovalReviewAction;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::McpServerElicitationRequest;
@@ -1121,6 +1120,124 @@ impl QueuedUserMessage {
 impl From<UserMessage> for QueuedUserMessage {
     fn from(user_message: UserMessage) -> Self {
         Self::new(user_message, QueuedInputAction::Plain)
+    }
+}
+
+fn guardian_assessment_event_from_started_notification(
+    notification: codex_app_server_protocol::ItemGuardianApprovalReviewStartedNotification,
+) -> GuardianAssessmentEvent {
+    let codex_app_server_protocol::GuardianApprovalReview {
+        status,
+        risk_level,
+        user_authorization,
+        rationale,
+    } = notification.review;
+    GuardianAssessmentEvent {
+        id: notification.review_id,
+        target_item_id: None,
+        turn_id: notification.turn_id,
+        started_at_ms: notification.started_at_ms,
+        completed_at_ms: None,
+        status: guardian_assessment_status(status),
+        risk_level: risk_level.map(guardian_risk_level),
+        user_authorization: user_authorization.map(guardian_user_authorization),
+        rationale,
+        decision_source: None,
+        action: notification.action.into(),
+    }
+}
+
+fn guardian_assessment_event_from_completed_notification(
+    notification: codex_app_server_protocol::ItemGuardianApprovalReviewCompletedNotification,
+) -> GuardianAssessmentEvent {
+    let codex_app_server_protocol::GuardianApprovalReview {
+        status,
+        risk_level,
+        user_authorization,
+        rationale,
+    } = notification.review;
+    GuardianAssessmentEvent {
+        id: notification.review_id,
+        target_item_id: None,
+        turn_id: notification.turn_id,
+        started_at_ms: notification.started_at_ms,
+        completed_at_ms: Some(notification.completed_at_ms),
+        status: guardian_assessment_status(status),
+        risk_level: risk_level.map(guardian_risk_level),
+        user_authorization: user_authorization.map(guardian_user_authorization),
+        rationale,
+        decision_source: Some(guardian_decision_source(notification.decision_source)),
+        action: notification.action.into(),
+    }
+}
+
+fn guardian_assessment_status(
+    status: codex_app_server_protocol::GuardianApprovalReviewStatus,
+) -> GuardianAssessmentStatus {
+    match status {
+        codex_app_server_protocol::GuardianApprovalReviewStatus::InProgress => {
+            GuardianAssessmentStatus::InProgress
+        }
+        codex_app_server_protocol::GuardianApprovalReviewStatus::Approved => {
+            GuardianAssessmentStatus::Approved
+        }
+        codex_app_server_protocol::GuardianApprovalReviewStatus::Denied => {
+            GuardianAssessmentStatus::Denied
+        }
+        codex_app_server_protocol::GuardianApprovalReviewStatus::TimedOut => {
+            GuardianAssessmentStatus::TimedOut
+        }
+        codex_app_server_protocol::GuardianApprovalReviewStatus::Aborted => {
+            GuardianAssessmentStatus::Aborted
+        }
+    }
+}
+
+fn guardian_risk_level(
+    risk_level: codex_app_server_protocol::GuardianRiskLevel,
+) -> codex_protocol::approvals::GuardianRiskLevel {
+    match risk_level {
+        codex_app_server_protocol::GuardianRiskLevel::Low => {
+            codex_protocol::approvals::GuardianRiskLevel::Low
+        }
+        codex_app_server_protocol::GuardianRiskLevel::Medium => {
+            codex_protocol::approvals::GuardianRiskLevel::Medium
+        }
+        codex_app_server_protocol::GuardianRiskLevel::High => {
+            codex_protocol::approvals::GuardianRiskLevel::High
+        }
+        codex_app_server_protocol::GuardianRiskLevel::Critical => {
+            codex_protocol::approvals::GuardianRiskLevel::Critical
+        }
+    }
+}
+
+fn guardian_user_authorization(
+    user_authorization: codex_app_server_protocol::GuardianUserAuthorization,
+) -> codex_protocol::approvals::GuardianUserAuthorization {
+    match user_authorization {
+        codex_app_server_protocol::GuardianUserAuthorization::Unknown => {
+            codex_protocol::approvals::GuardianUserAuthorization::Unknown
+        }
+        codex_app_server_protocol::GuardianUserAuthorization::Low => {
+            codex_protocol::approvals::GuardianUserAuthorization::Low
+        }
+        codex_app_server_protocol::GuardianUserAuthorization::Medium => {
+            codex_protocol::approvals::GuardianUserAuthorization::Medium
+        }
+        codex_app_server_protocol::GuardianUserAuthorization::High => {
+            codex_protocol::approvals::GuardianUserAuthorization::High
+        }
+    }
+}
+
+fn guardian_decision_source(
+    decision_source: codex_app_server_protocol::AutoReviewDecisionSource,
+) -> GuardianAssessmentDecisionSource {
+    match decision_source {
+        codex_app_server_protocol::AutoReviewDecisionSource::Agent => {
+            GuardianAssessmentDecisionSource::Agent
+        }
     }
 }
 
@@ -6372,26 +6489,14 @@ impl ChatWidget {
                 self.on_mcp_server_status_updated(notification)
             }
             ServerNotification::ItemGuardianApprovalReviewStarted(notification) => {
-                self.on_guardian_review_notification(
-                    notification.review_id,
-                    notification.turn_id,
-                    notification.started_at_ms,
-                    /*completed_at_ms*/ None,
-                    notification.review,
-                    /*decision_source*/ None,
-                    notification.action,
-                );
+                self.on_guardian_assessment(guardian_assessment_event_from_started_notification(
+                    notification,
+                ));
             }
             ServerNotification::ItemGuardianApprovalReviewCompleted(notification) => {
-                self.on_guardian_review_notification(
-                    notification.review_id,
-                    notification.turn_id,
-                    notification.started_at_ms,
-                    Some(notification.completed_at_ms),
-                    notification.review,
-                    Some(notification.decision_source),
-                    notification.action,
-                );
+                self.on_guardian_assessment(guardian_assessment_event_from_completed_notification(
+                    notification,
+                ));
             }
             ServerNotification::ThreadClosed(_) => {
                 if !from_replay {
@@ -6567,79 +6672,6 @@ impl ChatWidget {
     }
 
     fn on_patch_apply_output_delta(&mut self, _item_id: String, _delta: String) {}
-
-    fn on_guardian_review_notification(
-        &mut self,
-        id: String,
-        turn_id: String,
-        started_at_ms: i64,
-        completed_at_ms: Option<i64>,
-        review: codex_app_server_protocol::GuardianApprovalReview,
-        decision_source: Option<codex_app_server_protocol::AutoReviewDecisionSource>,
-        action: GuardianApprovalReviewAction,
-    ) {
-        self.on_guardian_assessment(GuardianAssessmentEvent {
-            id,
-            target_item_id: None,
-            turn_id,
-            started_at_ms,
-            completed_at_ms,
-            status: match review.status {
-                codex_app_server_protocol::GuardianApprovalReviewStatus::InProgress => {
-                    GuardianAssessmentStatus::InProgress
-                }
-                codex_app_server_protocol::GuardianApprovalReviewStatus::Approved => {
-                    GuardianAssessmentStatus::Approved
-                }
-                codex_app_server_protocol::GuardianApprovalReviewStatus::Denied => {
-                    GuardianAssessmentStatus::Denied
-                }
-                codex_app_server_protocol::GuardianApprovalReviewStatus::TimedOut => {
-                    GuardianAssessmentStatus::TimedOut
-                }
-                codex_app_server_protocol::GuardianApprovalReviewStatus::Aborted => {
-                    GuardianAssessmentStatus::Aborted
-                }
-            },
-            risk_level: review.risk_level.map(|risk_level| match risk_level {
-                codex_app_server_protocol::GuardianRiskLevel::Low => {
-                    codex_protocol::approvals::GuardianRiskLevel::Low
-                }
-                codex_app_server_protocol::GuardianRiskLevel::Medium => {
-                    codex_protocol::approvals::GuardianRiskLevel::Medium
-                }
-                codex_app_server_protocol::GuardianRiskLevel::High => {
-                    codex_protocol::approvals::GuardianRiskLevel::High
-                }
-                codex_app_server_protocol::GuardianRiskLevel::Critical => {
-                    codex_protocol::approvals::GuardianRiskLevel::Critical
-                }
-            }),
-            user_authorization: review.user_authorization.map(|user_authorization| {
-                match user_authorization {
-                    codex_app_server_protocol::GuardianUserAuthorization::Unknown => {
-                        codex_protocol::approvals::GuardianUserAuthorization::Unknown
-                    }
-                    codex_app_server_protocol::GuardianUserAuthorization::Low => {
-                        codex_protocol::approvals::GuardianUserAuthorization::Low
-                    }
-                    codex_app_server_protocol::GuardianUserAuthorization::Medium => {
-                        codex_protocol::approvals::GuardianUserAuthorization::Medium
-                    }
-                    codex_app_server_protocol::GuardianUserAuthorization::High => {
-                        codex_protocol::approvals::GuardianUserAuthorization::High
-                    }
-                }
-            }),
-            rationale: review.rationale,
-            decision_source: decision_source.map(|source| match source {
-                codex_app_server_protocol::AutoReviewDecisionSource::Agent => {
-                    GuardianAssessmentDecisionSource::Agent
-                }
-            }),
-            action: action.into(),
-        });
-    }
 
     fn enter_review_mode_with_hint(&mut self, hint: String, from_replay: bool) {
         if self.pre_review_token_info.is_none() {
