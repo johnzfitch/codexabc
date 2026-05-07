@@ -427,7 +427,7 @@ mod tests {
         .expect("metrics client");
 
         metrics
-            .counter("test.resource_attributes", 1, &[])
+            .counter("test.resource_attributes", /*inc*/ 1, &[])
             .expect("counter");
         let snapshot = metrics.snapshot().expect("snapshot");
         let attributes: BTreeMap<String, String> = snapshot

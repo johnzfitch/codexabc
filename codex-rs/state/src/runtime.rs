@@ -104,7 +104,7 @@ impl StateRuntime {
     /// rest of the state store. Use [`Self::init_with_metrics`] when the caller
     /// has a metrics sink to attach.
     pub async fn init(codex_home: PathBuf, default_provider: String) -> anyhow::Result<Arc<Self>> {
-        Self::init_with_metrics(codex_home, default_provider, None).await
+        Self::init_with_metrics(codex_home, default_provider, /*metrics*/ None).await
     }
 
     /// Initialize the state runtime with an explicit metrics client.
@@ -462,9 +462,13 @@ mod tests {
         strict_pool.close().await;
 
         let tolerant_migrator = runtime_state_migrator();
-        let tolerant_pool = open_state_sqlite(state_path.as_path(), &tolerant_migrator, None)
-            .await
-            .expect("runtime migrator should tolerate newer applied migrations");
+        let tolerant_pool = open_state_sqlite(
+            state_path.as_path(),
+            &tolerant_migrator,
+            /*metrics*/ None,
+        )
+        .await
+        .expect("runtime migrator should tolerate newer applied migrations");
         tolerant_pool.close().await;
 
         let _ = tokio::fs::remove_dir_all(codex_home).await;
