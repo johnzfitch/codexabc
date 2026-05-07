@@ -453,6 +453,9 @@ async fn emit_hook_started_events(
     preview_runs: Vec<HookRunSummary>,
 ) {
     for run in preview_runs {
+        if !should_emit_hook_notification(&run) {
+            continue;
+        }
         sess.send_event(
             turn_context,
             EventMsg::HookStarted(HookStartedEvent {
@@ -472,9 +475,15 @@ pub(crate) async fn emit_hook_completed_events(
     for completed in completed_events {
         emit_hook_completed_metrics(turn_context, &completed);
         track_hook_completed_analytics(sess, turn_context, &completed);
-        sess.send_event(turn_context, EventMsg::HookCompleted(completed))
-            .await;
+        if should_emit_hook_notification(&completed.run) {
+            sess.send_event(turn_context, EventMsg::HookCompleted(completed))
+                .await;
+        }
     }
+}
+
+fn should_emit_hook_notification(run: &HookRunSummary) -> bool {
+    !run.suppress_notifications
 }
 
 fn emit_hook_completed_metrics(turn_context: &TurnContext, completed: &HookCompletedEvent) {
@@ -597,6 +606,7 @@ mod tests {
     use super::additional_context_messages;
     use super::hook_run_analytics_payload;
     use super::hook_run_metric_tags;
+    use super::should_emit_hook_notification;
     use crate::session::tests::make_session_and_context;
     use codex_protocol::protocol::HookCompletedEvent;
     use codex_protocol::protocol::HookRunSummary;
@@ -712,6 +722,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn suppressed_hook_runs_do_not_emit_notifications() {
+        let mut run = sample_hook_run(HookRunStatus::Completed, HookSource::CloudRequirements);
+
+        assert!(should_emit_hook_notification(&run));
+
+        run.suppress_notifications = true;
+
+        assert!(!should_emit_hook_notification(&run));
+    }
+
     fn sample_hook_run(status: HookRunStatus, source: HookSource) -> HookRunSummary {
         HookRunSummary {
             id: "stop:0:/tmp/hooks.json".to_string(),
@@ -728,6 +749,7 @@ mod tests {
             completed_at: Some(37),
             duration_ms: Some(27),
             entries: Vec::new(),
+            suppress_notifications: false,
         }
     }
 }

@@ -50,6 +50,7 @@ pub(crate) struct ConfiguredHandler {
     pub source: HookSource,
     pub display_order: i64,
     pub env: HashMap<String, String>,
+    pub suppress_notifications: bool,
 }
 
 impl ConfiguredHandler {

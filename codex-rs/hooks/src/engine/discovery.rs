@@ -10,7 +10,10 @@ use codex_config::HookEventsToml;
 use codex_config::HookHandlerConfig;
 use codex_config::HookStateToml;
 use codex_config::HooksFile;
+use codex_config::ManagedHookEventsToml;
+use codex_config::ManagedHookHandlerConfig;
 use codex_config::ManagedHooksRequirementsToml;
+use codex_config::ManagedMatcherGroup;
 use codex_config::MatcherGroup;
 use codex_config::RequirementSource;
 use codex_config::TomlValue;
@@ -44,6 +47,18 @@ struct HookHandlerSource<'a> {
     hook_states: &'a HashMap<String, HookStateToml>,
     env: HashMap<String, String>,
     plugin_id: Option<String>,
+}
+
+struct DiscoveredHookHandler {
+    handler: HookHandlerConfig,
+    suppress_notifications: bool,
+}
+
+struct DiscoveredMatcherGroup {
+    event_name: codex_protocol::protocol::HookEventName,
+    group_index: usize,
+    matcher: Option<String>,
+    handlers: Vec<DiscoveredHookHandler>,
 }
 
 pub(crate) fn discover_handlers(
@@ -140,7 +155,7 @@ fn append_managed_requirement_handlers(
     else {
         return;
     };
-    append_hook_events(
+    append_managed_hook_events(
         handlers,
         hook_entries,
         warnings,
@@ -272,7 +287,20 @@ fn load_hooks_json(
         }
     };
 
-    let parsed: HooksFile = match serde_json::from_str(&contents) {
+    let raw_json: serde_json::Value = match serde_json::from_str(&contents) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            warnings.push(format!(
+                "failed to parse hooks config {}: {err}",
+                source_path.display()
+            ));
+            return None;
+        }
+    };
+    if json_hook_config_contains_suppress(&raw_json) {
+        warnings.push(unsupported_suppress_warning(source_path.as_path()));
+    }
+    let parsed: HooksFile = match serde_json::from_value(raw_json) {
         Ok(parsed) => parsed,
         Err(err) => {
             warnings.push(format!(
@@ -301,6 +329,9 @@ fn load_toml_hooks_from_layer(
 ) -> Option<(AbsolutePathBuf, HookEventsToml)> {
     let source_path = config_toml_source_path(layer);
     let hook_value = layer.config.get("hooks")?.clone();
+    if toml_hook_config_contains_suppress(&hook_value) {
+        warnings.push(unsupported_suppress_warning(source_path.as_path()));
+    }
     let parsed = match HookEventsToml::deserialize(hook_value) {
         Ok(parsed) => parsed,
         Err(err) => {
@@ -313,6 +344,53 @@ fn load_toml_hooks_from_layer(
     };
 
     (!parsed.is_empty()).then_some((source_path, parsed))
+}
+
+fn unsupported_suppress_warning(source_path: &Path) -> String {
+    format!(
+        "ignoring unsupported `suppress` in hook config {}; `suppress` is only supported for managed hooks in requirements",
+        source_path.display()
+    )
+}
+
+fn json_hook_config_contains_suppress(value: &serde_json::Value) -> bool {
+    value
+        .get("hooks")
+        .is_some_and(json_hook_events_contain_suppress)
+}
+
+fn json_hook_events_contain_suppress(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|events| events.values().any(json_groups_contain_suppress))
+}
+
+fn json_groups_contain_suppress(value: &serde_json::Value) -> bool {
+    value.as_array().is_some_and(|groups| {
+        groups.iter().any(|group| {
+            group
+                .get("hooks")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|hooks| hooks.iter().any(|hook| hook.get("suppress").is_some()))
+        })
+    })
+}
+
+fn toml_hook_config_contains_suppress(value: &TomlValue) -> bool {
+    value
+        .as_table()
+        .is_some_and(|events| events.values().any(toml_groups_contain_suppress))
+}
+
+fn toml_groups_contain_suppress(value: &TomlValue) -> bool {
+    value.as_array().is_some_and(|groups| {
+        groups.iter().any(|group| {
+            group
+                .get("hooks")
+                .and_then(TomlValue::as_array)
+                .is_some_and(|hooks| hooks.iter().any(|hook| hook.get("suppress").is_some()))
+        })
+    })
 }
 
 fn config_toml_source_path(layer: &ConfigLayerEntry) -> AbsolutePathBuf {
@@ -364,6 +442,27 @@ fn append_hook_events(
     }
 }
 
+fn append_managed_hook_events(
+    handlers: &mut Vec<ConfiguredHandler>,
+    hook_entries: &mut Vec<HookListEntry>,
+    warnings: &mut Vec<String>,
+    display_order: &mut i64,
+    source: HookHandlerSource<'_>,
+    hook_events: ManagedHookEventsToml,
+) {
+    for (event_name, groups) in hook_events.into_matcher_groups() {
+        append_managed_matcher_groups(
+            handlers,
+            hook_entries,
+            warnings,
+            display_order,
+            &source,
+            event_name,
+            groups,
+        );
+    }
+}
+
 fn append_matcher_groups(
     handlers: &mut Vec<ConfiguredHandler>,
     hook_entries: &mut Vec<HookListEntry>,
@@ -374,104 +473,198 @@ fn append_matcher_groups(
     groups: Vec<MatcherGroup>,
 ) {
     for (group_index, group) in groups.into_iter().enumerate() {
-        let matcher = matcher_pattern_for_event(event_name, group.matcher.as_deref());
-        if let Some(matcher) = matcher
-            && let Err(err) = validate_matcher_pattern(matcher)
-        {
-            warnings.push(format!(
-                "invalid matcher {matcher:?} in {}: {err}",
-                source.path.display()
-            ));
-            continue;
-        }
-        for (handler_index, handler) in group.hooks.iter().cloned().enumerate() {
-            match handler {
-                HookHandlerConfig::Command {
-                    command,
-                    timeout_sec,
-                    r#async,
-                    status_message,
-                } => {
-                    if r#async {
-                        warnings.push(format!(
-                            "skipping async hook in {}: async hooks are not supported yet",
-                            source.path.display()
-                        ));
-                        continue;
-                    }
-                    if command.trim().is_empty() {
-                        warnings.push(format!(
-                            "skipping empty hook command in {}",
-                            source.path.display()
-                        ));
-                        continue;
-                    }
-                    let timeout_sec = timeout_sec.unwrap_or(600).max(1);
-                    let normalized_handler = HookHandlerConfig::Command {
-                        command: command.clone(),
-                        timeout_sec: Some(timeout_sec),
-                        r#async,
-                        status_message: status_message.clone(),
-                    };
-                    let current_hash =
-                        command_hook_hash(event_name, matcher, &group, normalized_handler);
-                    let command = source.env.iter().fold(command, |command, (key, value)| {
-                        command.replace(&format!("${{{key}}}"), value)
-                    });
-                    // TODO(abhinav): replace this positional suffix with a durable hook id.
-                    let key =
-                        crate::hook_key(&source.key_source, event_name, group_index, handler_index);
-                    let state = source.hook_states.get(&key);
-                    let enabled = hook_enabled(source.is_managed, state);
-                    let trusted_hash = hook_trusted_hash(source.is_managed, state);
-                    let trust_status =
-                        hook_trust_status(source.is_managed, &current_hash, trusted_hash);
-                    hook_entries.push(HookListEntry {
-                        key,
-                        event_name,
-                        handler_type: HookHandlerType::Command,
-                        matcher: matcher.map(ToOwned::to_owned),
-                        command: Some(command.clone()),
-                        timeout_sec,
-                        status_message: status_message.clone(),
-                        source_path: source.path.clone(),
-                        source: source.source,
-                        plugin_id: source.plugin_id.clone(),
-                        display_order: *display_order,
-                        enabled,
-                        is_managed: source.is_managed,
-                        current_hash,
-                        trust_status,
-                    });
-                    if enabled
-                        && matches!(
-                            trust_status,
-                            HookTrustStatus::Managed | HookTrustStatus::Trusted
-                        )
-                    {
-                        handlers.push(ConfiguredHandler {
-                            event_name,
-                            matcher: matcher.map(ToOwned::to_owned),
+        append_matcher_group_handlers(
+            handlers,
+            hook_entries,
+            warnings,
+            display_order,
+            source,
+            DiscoveredMatcherGroup {
+                event_name,
+                group_index,
+                matcher: group.matcher,
+                handlers: group
+                    .hooks
+                    .into_iter()
+                    .map(|handler| DiscoveredHookHandler {
+                        handler,
+                        suppress_notifications: false,
+                    })
+                    .collect(),
+            },
+        );
+    }
+}
+
+fn append_managed_matcher_groups(
+    handlers: &mut Vec<ConfiguredHandler>,
+    hook_entries: &mut Vec<HookListEntry>,
+    warnings: &mut Vec<String>,
+    display_order: &mut i64,
+    source: &HookHandlerSource<'_>,
+    event_name: codex_protocol::protocol::HookEventName,
+    groups: Vec<ManagedMatcherGroup>,
+) {
+    for (group_index, group) in groups.into_iter().enumerate() {
+        append_matcher_group_handlers(
+            handlers,
+            hook_entries,
+            warnings,
+            display_order,
+            source,
+            DiscoveredMatcherGroup {
+                event_name,
+                group_index,
+                matcher: group.matcher,
+                handlers: group
+                    .hooks
+                    .into_iter()
+                    .map(|handler| match handler {
+                        ManagedHookHandlerConfig::Command {
                             command,
                             timeout_sec,
+                            r#async,
                             status_message,
-                            source_path: source.path.clone(),
-                            source: source.source,
-                            display_order: *display_order,
-                            env: source.env.clone(),
-                        });
-                    }
-                    *display_order += 1;
+                            suppress,
+                        } => DiscoveredHookHandler {
+                            handler: HookHandlerConfig::Command {
+                                command,
+                                timeout_sec,
+                                r#async,
+                                status_message,
+                            },
+                            suppress_notifications: suppress,
+                        },
+                        ManagedHookHandlerConfig::Prompt {} => DiscoveredHookHandler {
+                            handler: HookHandlerConfig::Prompt {},
+                            suppress_notifications: false,
+                        },
+                        ManagedHookHandlerConfig::Agent {} => DiscoveredHookHandler {
+                            handler: HookHandlerConfig::Agent {},
+                            suppress_notifications: false,
+                        },
+                    })
+                    .collect(),
+            },
+        );
+    }
+}
+
+fn append_matcher_group_handlers(
+    handlers: &mut Vec<ConfiguredHandler>,
+    hook_entries: &mut Vec<HookListEntry>,
+    warnings: &mut Vec<String>,
+    display_order: &mut i64,
+    source: &HookHandlerSource<'_>,
+    group: DiscoveredMatcherGroup,
+) {
+    let DiscoveredMatcherGroup {
+        event_name,
+        group_index,
+        matcher,
+        handlers: discovered_handlers,
+    } = group;
+    let matcher = matcher_pattern_for_event(event_name, matcher.as_deref());
+    if let Some(matcher) = matcher
+        && let Err(err) = validate_matcher_pattern(matcher)
+    {
+        warnings.push(format!(
+            "invalid matcher {matcher:?} in {}: {err}",
+            source.path.display()
+        ));
+        return;
+    }
+    for (handler_index, discovered_handler) in discovered_handlers.into_iter().enumerate() {
+        let DiscoveredHookHandler {
+            handler,
+            suppress_notifications,
+        } = discovered_handler;
+        match handler {
+            HookHandlerConfig::Command {
+                command,
+                timeout_sec,
+                r#async,
+                status_message,
+            } => {
+                if r#async {
+                    warnings.push(format!(
+                        "skipping async hook in {}: async hooks are not supported yet",
+                        source.path.display()
+                    ));
+                    continue;
                 }
-                HookHandlerConfig::Prompt {} => warnings.push(format!(
-                    "skipping prompt hook in {}: prompt hooks are not supported yet",
-                    source.path.display()
-                )),
-                HookHandlerConfig::Agent {} => warnings.push(format!(
-                    "skipping agent hook in {}: agent hooks are not supported yet",
-                    source.path.display()
-                )),
+                if command.trim().is_empty() {
+                    warnings.push(format!(
+                        "skipping empty hook command in {}",
+                        source.path.display()
+                    ));
+                    continue;
+                }
+                let timeout_sec = timeout_sec.unwrap_or(600).max(1);
+                let normalized_handler = HookHandlerConfig::Command {
+                    command: command.clone(),
+                    timeout_sec: Some(timeout_sec),
+                    r#async,
+                    status_message: status_message.clone(),
+                };
+                let current_hash = command_hook_hash(event_name, matcher, normalized_handler);
+                let command = source.env.iter().fold(command, |command, (key, value)| {
+                    command.replace(&format!("${{{key}}}"), value)
+                });
+                // TODO(abhinav): replace this positional suffix with a durable hook id.
+                let key =
+                    crate::hook_key(&source.key_source, event_name, group_index, handler_index);
+                let state = source.hook_states.get(&key);
+                let enabled = hook_enabled(source.is_managed, state);
+                let trusted_hash = hook_trusted_hash(source.is_managed, state);
+                let trust_status =
+                    hook_trust_status(source.is_managed, &current_hash, trusted_hash);
+                hook_entries.push(HookListEntry {
+                    key,
+                    event_name,
+                    handler_type: HookHandlerType::Command,
+                    matcher: matcher.map(ToOwned::to_owned),
+                    command: Some(command.clone()),
+                    timeout_sec,
+                    status_message: status_message.clone(),
+                    source_path: source.path.clone(),
+                    source: source.source,
+                    plugin_id: source.plugin_id.clone(),
+                    display_order: *display_order,
+                    enabled,
+                    is_managed: source.is_managed,
+                    current_hash,
+                    trust_status,
+                });
+                if enabled
+                    && matches!(
+                        trust_status,
+                        HookTrustStatus::Managed | HookTrustStatus::Trusted
+                    )
+                {
+                    handlers.push(ConfiguredHandler {
+                        event_name,
+                        matcher: matcher.map(ToOwned::to_owned),
+                        command,
+                        timeout_sec,
+                        status_message,
+                        source_path: source.path.clone(),
+                        source: source.source,
+                        display_order: *display_order,
+                        env: source.env.clone(),
+                        suppress_notifications,
+                    });
+                }
+                *display_order += 1;
             }
+            HookHandlerConfig::Prompt {} => warnings.push(format!(
+                "skipping prompt hook in {}: prompt hooks are not supported yet",
+                source.path.display()
+            )),
+            HookHandlerConfig::Agent {} => warnings.push(format!(
+                "skipping agent hook in {}: agent hooks are not supported yet",
+                source.path.display()
+            )),
         }
     }
 }
@@ -488,15 +681,14 @@ struct NormalizedHookIdentity {
 fn command_hook_hash(
     event_name: codex_protocol::protocol::HookEventName,
     matcher: Option<&str>,
-    group: &MatcherGroup,
     normalized_handler: HookHandlerConfig,
 ) -> String {
-    let mut group = group.clone();
-    group.matcher = matcher.map(ToOwned::to_owned);
-    group.hooks = vec![normalized_handler];
     let identity = NormalizedHookIdentity {
         event_name: crate::hook_event_key_label(event_name),
-        group,
+        group: MatcherGroup {
+            matcher: matcher.map(ToOwned::to_owned),
+            hooks: vec![normalized_handler],
+        },
     };
     let Ok(value) = TomlValue::try_from(identity) else {
         unreachable!("normalized hook identity should serialize to TOML");
@@ -646,6 +838,7 @@ mod tests {
                 source: hook_source(),
                 display_order: 0,
                 env: std::collections::HashMap::new(),
+                suppress_notifications: false,
             }]
         );
     }
@@ -681,6 +874,7 @@ mod tests {
                 source: hook_source(),
                 display_order: 0,
                 env: std::collections::HashMap::new(),
+                suppress_notifications: false,
             }]
         );
     }
@@ -746,6 +940,53 @@ mod tests {
             .expect("valid hook events should still load");
 
         assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(
+            hooks,
+            HookEventsToml {
+                session_start: vec![MatcherGroup {
+                    matcher: None,
+                    hooks: vec![HookHandlerConfig::Command {
+                        command: "echo hello".to_string(),
+                        timeout_sec: None,
+                        r#async: false,
+                        status_message: None,
+                    }],
+                }],
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn toml_hook_discovery_warns_and_ignores_suppress_outside_requirements() {
+        let layer = ConfigLayerEntry::new(
+            ConfigLayerSource::User {
+                file: test_path_buf("/tmp/config.toml").abs(),
+            },
+            serde_json::from_value(serde_json::json!({
+                "hooks": {
+                    "SessionStart": [{
+                        "hooks": [{
+                            "type": "command",
+                            "command": "echo hello",
+                            "suppress": true,
+                        }],
+                    }],
+                },
+            }))
+            .expect("config TOML should deserialize"),
+        );
+        let mut warnings = Vec::new();
+
+        let (_, hooks) = super::load_toml_hooks_from_layer(&layer, &mut warnings)
+            .expect("valid hook events should still load");
+
+        assert_eq!(
+            warnings,
+            vec![
+                "ignoring unsupported `suppress` in hook config /tmp/config.toml; `suppress` is only supported for managed hooks in requirements".to_string()
+            ]
+        );
         assert_eq!(
             hooks,
             HookEventsToml {

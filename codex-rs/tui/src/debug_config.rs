@@ -514,10 +514,10 @@ mod tests {
     use codex_config::ConstrainedWithSource;
     use codex_config::FeatureRequirementsToml;
     use codex_config::FilesystemConstraints;
-    use codex_config::HookEventsToml;
-    use codex_config::HookHandlerConfig;
+    use codex_config::ManagedHookEventsToml;
+    use codex_config::ManagedHookHandlerConfig;
     use codex_config::ManagedHooksRequirementsToml;
-    use codex_config::MatcherGroup;
+    use codex_config::ManagedMatcherGroup;
     use codex_config::McpServerIdentity;
     use codex_config::McpServerRequirement;
     use codex_config::NetworkConstraints;
@@ -925,14 +925,15 @@ approval_policy = "never"
                         std::path::PathBuf::from("/enterprise/hooks")
                     }),
                     windows_managed_dir: Some(std::path::PathBuf::from(r"C:\enterprise\hooks")),
-                    hooks: HookEventsToml {
-                        pre_tool_use: vec![MatcherGroup {
+                    hooks: ManagedHookEventsToml {
+                        pre_tool_use: vec![ManagedMatcherGroup {
                             matcher: Some("^Bash$".to_string()),
-                            hooks: vec![HookHandlerConfig::Command {
+                            hooks: vec![ManagedHookHandlerConfig::Command {
                                 command: "python3 /enterprise/hooks/pre.py".to_string(),
                                 timeout_sec: Some(10),
                                 r#async: false,
                                 status_message: Some("checking".to_string()),
+                                suppress: false,
                             }],
                         }],
                         ..Default::default()

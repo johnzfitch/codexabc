@@ -1559,6 +1559,10 @@ pub struct HookRunSummary {
     #[ts(type = "number | null")]
     pub duration_ms: Option<i64>,
     pub entries: Vec<HookOutputEntry>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub suppress_notifications: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]

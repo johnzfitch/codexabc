@@ -144,7 +144,7 @@ pub struct ManagedHooksRequirementsToml {
     pub managed_dir: Option<PathBuf>,
     pub windows_managed_dir: Option<PathBuf>,
     #[serde(flatten)]
-    pub hooks: HookEventsToml,
+    pub hooks: ManagedHookEventsToml,
 }
 
 impl ManagedHooksRequirementsToml {
@@ -172,6 +172,118 @@ impl ManagedHooksRequirementsToml {
             self.managed_dir.as_deref()
         }
     }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedHookEventsToml {
+    #[serde(rename = "PreToolUse", default)]
+    pub pre_tool_use: Vec<ManagedMatcherGroup>,
+    #[serde(rename = "PermissionRequest", default)]
+    pub permission_request: Vec<ManagedMatcherGroup>,
+    #[serde(rename = "PostToolUse", default)]
+    pub post_tool_use: Vec<ManagedMatcherGroup>,
+    #[serde(rename = "PreCompact", default)]
+    pub pre_compact: Vec<ManagedMatcherGroup>,
+    #[serde(rename = "PostCompact", default)]
+    pub post_compact: Vec<ManagedMatcherGroup>,
+    #[serde(rename = "SessionStart", default)]
+    pub session_start: Vec<ManagedMatcherGroup>,
+    #[serde(rename = "UserPromptSubmit", default)]
+    pub user_prompt_submit: Vec<ManagedMatcherGroup>,
+    #[serde(rename = "Stop", default)]
+    pub stop: Vec<ManagedMatcherGroup>,
+}
+
+impl ManagedHookEventsToml {
+    pub fn is_empty(&self) -> bool {
+        let Self {
+            pre_tool_use,
+            permission_request,
+            post_tool_use,
+            pre_compact,
+            post_compact,
+            session_start,
+            user_prompt_submit,
+            stop,
+        } = self;
+        pre_tool_use.is_empty()
+            && permission_request.is_empty()
+            && post_tool_use.is_empty()
+            && pre_compact.is_empty()
+            && post_compact.is_empty()
+            && session_start.is_empty()
+            && user_prompt_submit.is_empty()
+            && stop.is_empty()
+    }
+
+    pub fn handler_count(&self) -> usize {
+        let Self {
+            pre_tool_use,
+            permission_request,
+            post_tool_use,
+            pre_compact,
+            post_compact,
+            session_start,
+            user_prompt_submit,
+            stop,
+        } = self;
+        [
+            pre_tool_use,
+            permission_request,
+            post_tool_use,
+            pre_compact,
+            post_compact,
+            session_start,
+            user_prompt_submit,
+            stop,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|group| group.hooks.len())
+        .sum()
+    }
+
+    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<ManagedMatcherGroup>); 8] {
+        [
+            (HookEventName::PreToolUse, self.pre_tool_use),
+            (HookEventName::PermissionRequest, self.permission_request),
+            (HookEventName::PostToolUse, self.post_tool_use),
+            (HookEventName::PreCompact, self.pre_compact),
+            (HookEventName::PostCompact, self.post_compact),
+            (HookEventName::SessionStart, self.session_start),
+            (HookEventName::UserPromptSubmit, self.user_prompt_submit),
+            (HookEventName::Stop, self.stop),
+        ]
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedMatcherGroup {
+    #[serde(default)]
+    pub matcher: Option<String>,
+    #[serde(default)]
+    pub hooks: Vec<ManagedHookHandlerConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ManagedHookHandlerConfig {
+    #[serde(rename = "command")]
+    Command {
+        command: String,
+        #[serde(default, rename = "timeout")]
+        timeout_sec: Option<u64>,
+        #[serde(default)]
+        r#async: bool,
+        #[serde(default, rename = "statusMessage")]
+        status_message: Option<String>,
+        #[serde(default)]
+        suppress: bool,
+    },
+    #[serde(rename = "prompt")]
+    Prompt {},
+    #[serde(rename = "agent")]
+    Agent {},
 }
 
 #[cfg(test)]

@@ -12,7 +12,10 @@ use codex_config::Constrained;
 use codex_config::ConstrainedWithSource;
 use codex_config::HookEventsToml;
 use codex_config::HookHandlerConfig;
+use codex_config::ManagedHookEventsToml;
+use codex_config::ManagedHookHandlerConfig;
 use codex_config::ManagedHooksRequirementsToml;
+use codex_config::ManagedMatcherGroup;
 use codex_config::MatcherGroup;
 use codex_config::RequirementSource;
 use codex_config::TomlValue;
@@ -36,7 +39,7 @@ fn cwd() -> AbsolutePathBuf {
 
 fn managed_hooks_for_current_platform(
     managed_dir: impl AsRef<Path>,
-    hooks: HookEventsToml,
+    hooks: ManagedHookEventsToml,
 ) -> ManagedHooksRequirementsToml {
     let managed_dir = managed_dir.as_ref().to_path_buf();
     ManagedHooksRequirementsToml {
@@ -80,14 +83,15 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
 
     let managed_hooks = managed_hooks_for_current_platform(
         managed_dir.clone(),
-        HookEventsToml {
-            pre_tool_use: vec![MatcherGroup {
+        ManagedHookEventsToml {
+            pre_tool_use: vec![ManagedMatcherGroup {
                 matcher: Some("^Bash$".to_string()),
-                hooks: vec![HookHandlerConfig::Command {
+                hooks: vec![ManagedHookHandlerConfig::Command {
                     command: format!("python3 {}", script_path.display()),
                     timeout_sec: Some(10),
                     r#async: false,
                     status_message: Some("checking".to_string()),
+                    suppress: false,
                 }],
             }],
             ..Default::default()
@@ -123,6 +127,7 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
     assert!(engine.warnings().is_empty());
     assert_eq!(engine.handlers.len(), 1);
     assert_eq!(engine.handlers[0].source, HookSource::CloudRequirements);
+    assert!(!engine.handlers[0].suppress_notifications);
     let listed = crate::list_hooks(crate::HooksConfig {
         legacy_notify_argv: None,
         feature_enabled: true,
@@ -170,6 +175,72 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
 }
 
 #[test]
+fn requirements_managed_hooks_can_suppress_notifications() {
+    let temp = tempdir().expect("create temp dir");
+    let managed_dir =
+        AbsolutePathBuf::try_from(temp.path().join("managed-hooks")).expect("absolute path");
+    fs::create_dir_all(managed_dir.as_path()).expect("create managed hooks dir");
+    let managed_hooks = managed_hooks_for_current_platform(
+        managed_dir,
+        ManagedHookEventsToml {
+            user_prompt_submit: vec![ManagedMatcherGroup {
+                matcher: None,
+                hooks: vec![ManagedHookHandlerConfig::Command {
+                    command: "python3 /tmp/managed.py".to_string(),
+                    timeout_sec: Some(10),
+                    r#async: false,
+                    status_message: Some("checking".to_string()),
+                    suppress: true,
+                }],
+            }],
+            ..Default::default()
+        },
+    );
+    let config_layer_stack = ConfigLayerStack::new(
+        Vec::new(),
+        ConfigRequirements {
+            managed_hooks: Some(ConstrainedWithSource::new(
+                Constrained::allow_any(managed_hooks.clone()),
+                Some(RequirementSource::CloudRequirements),
+            )),
+            ..ConfigRequirements::default()
+        },
+        ConfigRequirementsToml {
+            hooks: Some(managed_hooks),
+            ..ConfigRequirementsToml::default()
+        },
+    )
+    .expect("config layer stack");
+
+    let engine = ClaudeHooksEngine::new(
+        /*enabled*/ true,
+        Some(&config_layer_stack),
+        Vec::new(),
+        Vec::new(),
+        CommandShell {
+            program: String::new(),
+            args: Vec::new(),
+        },
+    );
+
+    assert_eq!(engine.handlers.len(), 1);
+    assert!(engine.handlers[0].suppress_notifications);
+    let preview = engine.preview_user_prompt_submit(
+        &crate::events::user_prompt_submit::UserPromptSubmitRequest {
+            session_id: ThreadId::new(),
+            turn_id: "turn-1".to_string(),
+            cwd: cwd(),
+            transcript_path: None,
+            model: "gpt-test".to_string(),
+            permission_mode: "default".to_string(),
+            prompt: "hello".to_string(),
+        },
+    );
+    assert_eq!(preview.len(), 1);
+    assert!(preview[0].suppress_notifications);
+}
+
+#[test]
 fn unknown_requirement_source_hooks_stay_managed() {
     let temp = tempdir().expect("create temp dir");
     let managed_dir =
@@ -177,14 +248,15 @@ fn unknown_requirement_source_hooks_stay_managed() {
     fs::create_dir_all(managed_dir.as_path()).expect("create managed hooks dir");
     let managed_hooks = managed_hooks_for_current_platform(
         managed_dir,
-        HookEventsToml {
-            pre_tool_use: vec![MatcherGroup {
+        ManagedHookEventsToml {
+            pre_tool_use: vec![ManagedMatcherGroup {
                 matcher: Some("^Bash$".to_string()),
-                hooks: vec![HookHandlerConfig::Command {
+                hooks: vec![ManagedHookHandlerConfig::Command {
                     command: "python3 /tmp/managed.py".to_string(),
                     timeout_sec: Some(10),
                     r#async: false,
                     status_message: Some("checking".to_string()),
+                    suppress: false,
                 }],
             }],
             ..Default::default()
@@ -239,14 +311,15 @@ fn user_disablement_filters_non_managed_hooks_but_not_managed_hooks() {
     fs::create_dir_all(managed_dir.as_path()).expect("create managed hooks dir");
     let managed_hooks = managed_hooks_for_current_platform(
         managed_dir.clone(),
-        HookEventsToml {
-            pre_tool_use: vec![MatcherGroup {
+        ManagedHookEventsToml {
+            pre_tool_use: vec![ManagedMatcherGroup {
                 matcher: Some("^Bash$".to_string()),
-                hooks: vec![HookHandlerConfig::Command {
+                hooks: vec![ManagedHookHandlerConfig::Command {
                     command: "python3 /tmp/managed.py".to_string(),
                     timeout_sec: Some(10),
                     r#async: false,
                     status_message: Some("checking".to_string()),
+                    suppress: false,
                 }],
             }],
             ..Default::default()
@@ -458,14 +531,15 @@ fn requirements_managed_hooks_warn_when_managed_dir_is_missing() {
     let missing_dir = temp.path().join("missing-managed-hooks");
     let managed_hooks = managed_hooks_for_current_platform(
         missing_dir.clone(),
-        HookEventsToml {
-            pre_tool_use: vec![MatcherGroup {
+        ManagedHookEventsToml {
+            pre_tool_use: vec![ManagedMatcherGroup {
                 matcher: Some("^Bash$".to_string()),
-                hooks: vec![HookHandlerConfig::Command {
+                hooks: vec![ManagedHookHandlerConfig::Command {
                     command: format!("python3 {}", missing_dir.join("pre.py").display()),
                     timeout_sec: Some(10),
                     r#async: false,
                     status_message: Some("checking".to_string()),
+                    suppress: false,
                 }],
             }],
             ..Default::default()

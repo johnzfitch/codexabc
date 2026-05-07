@@ -32,10 +32,10 @@ use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::ServerNotification;
 use codex_chatgpt::connectors;
 use codex_config::ConfigRequirementsToml;
-use codex_config::HookEventsToml;
-use codex_config::HookHandlerConfig as CoreHookHandlerConfig;
+use codex_config::ManagedHookEventsToml;
+use codex_config::ManagedHookHandlerConfig as CoreManagedHookHandlerConfig;
 use codex_config::ManagedHooksRequirementsToml;
-use codex_config::MatcherGroup as CoreMatcherGroup;
+use codex_config::ManagedMatcherGroup as CoreManagedMatcherGroup;
 use codex_config::ResidencyRequirement as CoreResidencyRequirement;
 use codex_config::SandboxModeRequirement as CoreSandboxModeRequirement;
 use codex_core::ThreadManager;
@@ -465,7 +465,7 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         windows_managed_dir,
         hooks,
     } = hooks;
-    let HookEventsToml {
+    let ManagedHookEventsToml {
         pre_tool_use,
         permission_request,
         post_tool_use,
@@ -479,52 +479,55 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
     ManagedHooksRequirements {
         managed_dir,
         windows_managed_dir,
-        pre_tool_use: map_hook_matcher_groups_to_api(pre_tool_use),
-        permission_request: map_hook_matcher_groups_to_api(permission_request),
-        post_tool_use: map_hook_matcher_groups_to_api(post_tool_use),
-        pre_compact: map_hook_matcher_groups_to_api(pre_compact),
-        post_compact: map_hook_matcher_groups_to_api(post_compact),
-        session_start: map_hook_matcher_groups_to_api(session_start),
-        user_prompt_submit: map_hook_matcher_groups_to_api(user_prompt_submit),
-        stop: map_hook_matcher_groups_to_api(stop),
+        pre_tool_use: map_managed_hook_matcher_groups_to_api(pre_tool_use),
+        permission_request: map_managed_hook_matcher_groups_to_api(permission_request),
+        post_tool_use: map_managed_hook_matcher_groups_to_api(post_tool_use),
+        pre_compact: map_managed_hook_matcher_groups_to_api(pre_compact),
+        post_compact: map_managed_hook_matcher_groups_to_api(post_compact),
+        session_start: map_managed_hook_matcher_groups_to_api(session_start),
+        user_prompt_submit: map_managed_hook_matcher_groups_to_api(user_prompt_submit),
+        stop: map_managed_hook_matcher_groups_to_api(stop),
     }
 }
 
-fn map_hook_matcher_groups_to_api(
-    groups: Vec<CoreMatcherGroup>,
+fn map_managed_hook_matcher_groups_to_api(
+    groups: Vec<CoreManagedMatcherGroup>,
 ) -> Vec<ConfiguredHookMatcherGroup> {
     groups
         .into_iter()
-        .map(map_hook_matcher_group_to_api)
+        .map(map_managed_hook_matcher_group_to_api)
         .collect()
 }
 
-fn map_hook_matcher_group_to_api(group: CoreMatcherGroup) -> ConfiguredHookMatcherGroup {
+fn map_managed_hook_matcher_group_to_api(
+    group: CoreManagedMatcherGroup,
+) -> ConfiguredHookMatcherGroup {
     ConfiguredHookMatcherGroup {
         matcher: group.matcher,
         hooks: group
             .hooks
             .into_iter()
-            .map(map_hook_handler_to_api)
+            .map(map_managed_hook_handler_to_api)
             .collect(),
     }
 }
 
-fn map_hook_handler_to_api(handler: CoreHookHandlerConfig) -> ConfiguredHookHandler {
+fn map_managed_hook_handler_to_api(handler: CoreManagedHookHandlerConfig) -> ConfiguredHookHandler {
     match handler {
-        CoreHookHandlerConfig::Command {
+        CoreManagedHookHandlerConfig::Command {
             command,
             timeout_sec,
             r#async,
             status_message,
+            suppress: _,
         } => ConfiguredHookHandler::Command {
             command,
             timeout_sec,
             r#async,
             status_message,
         },
-        CoreHookHandlerConfig::Prompt {} => ConfiguredHookHandler::Prompt {},
-        CoreHookHandlerConfig::Agent {} => ConfiguredHookHandler::Agent {},
+        CoreManagedHookHandlerConfig::Prompt {} => ConfiguredHookHandler::Prompt {},
+        CoreManagedHookHandlerConfig::Agent {} => ConfiguredHookHandler::Agent {},
     }
 }
 

@@ -6,7 +6,10 @@ use super::HookEventsToml;
 use super::HookHandlerConfig;
 use super::HooksFile;
 use super::HooksToml;
+use super::ManagedHookEventsToml;
+use super::ManagedHookHandlerConfig;
 use super::ManagedHooksRequirementsToml;
+use super::ManagedMatcherGroup;
 use super::MatcherGroup;
 
 #[test]
@@ -149,14 +152,53 @@ command = "python3 /enterprise/place/pre.py"
         ManagedHooksRequirementsToml {
             managed_dir: Some(std::path::PathBuf::from("/enterprise/place")),
             windows_managed_dir: None,
-            hooks: HookEventsToml {
-                pre_tool_use: vec![MatcherGroup {
+            hooks: ManagedHookEventsToml {
+                pre_tool_use: vec![ManagedMatcherGroup {
                     matcher: Some("^Bash$".to_string()),
-                    hooks: vec![HookHandlerConfig::Command {
+                    hooks: vec![ManagedHookHandlerConfig::Command {
                         command: "python3 /enterprise/place/pre.py".to_string(),
                         timeout_sec: None,
                         r#async: false,
                         status_message: None,
+                        suppress: false,
+                    }],
+                }],
+                ..Default::default()
+            },
+        }
+    );
+}
+
+#[test]
+fn managed_hooks_requirements_support_suppress() {
+    let parsed: ManagedHooksRequirementsToml = toml::from_str(
+        r#"
+managed_dir = "/enterprise/place"
+
+[[UserPromptSubmit]]
+
+[[UserPromptSubmit.hooks]]
+type = "command"
+command = "python3 /enterprise/place/prompt.py"
+suppress = true
+"#,
+    )
+    .expect("requirements hooks TOML should deserialize");
+
+    assert_eq!(
+        parsed,
+        ManagedHooksRequirementsToml {
+            managed_dir: Some(std::path::PathBuf::from("/enterprise/place")),
+            windows_managed_dir: None,
+            hooks: ManagedHookEventsToml {
+                user_prompt_submit: vec![ManagedMatcherGroup {
+                    matcher: None,
+                    hooks: vec![ManagedHookHandlerConfig::Command {
+                        command: "python3 /enterprise/place/prompt.py".to_string(),
+                        timeout_sec: None,
+                        r#async: false,
+                        status_message: None,
+                        suppress: true,
                     }],
                 }],
                 ..Default::default()

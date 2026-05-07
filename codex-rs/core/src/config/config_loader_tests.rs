@@ -1152,14 +1152,15 @@ async fn load_config_layers_includes_cloud_hook_requirements() -> anyhow::Result
         hooks: Some(codex_config::ManagedHooksRequirementsToml {
             managed_dir: Some(managed_dir.clone()),
             windows_managed_dir: None,
-            hooks: codex_config::HookEventsToml {
-                pre_tool_use: vec![codex_config::MatcherGroup {
+            hooks: codex_config::ManagedHookEventsToml {
+                pre_tool_use: vec![codex_config::ManagedMatcherGroup {
                     matcher: Some("^Bash$".to_string()),
-                    hooks: vec![codex_config::HookHandlerConfig::Command {
+                    hooks: vec![codex_config::ManagedHookHandlerConfig::Command {
                         command: format!("python3 {}/pre.py", managed_dir.display()),
                         timeout_sec: Some(10),
                         r#async: false,
                         status_message: Some("checking".to_string()),
+                        suppress: false,
                     }],
                 }],
                 ..Default::default()

@@ -79,6 +79,7 @@ pub(crate) fn running_summary(handler: &ConfiguredHandler) -> HookRunSummary {
         completed_at: None,
         duration_ms: None,
         entries: Vec::new(),
+        suppress_notifications: handler.suppress_notifications,
     }
 }
 
@@ -125,6 +126,7 @@ pub(crate) fn completed_summary(
         completed_at: Some(run_result.completed_at),
         duration_ms: Some(run_result.duration_ms),
         entries,
+        suppress_notifications: handler.suppress_notifications,
     }
 }
 
@@ -168,6 +170,7 @@ mod tests {
             source: HookSource::User,
             display_order,
             env: std::collections::HashMap::new(),
+            suppress_notifications: false,
         }
     }
 
