@@ -242,8 +242,8 @@ mod tests {
             tools,
             vec![
                 LoadableToolSpec::Namespace(ResponsesApiNamespace {
-                    name: "mcp__calendar__".to_string(),
-                    description: "Tools in the mcp__calendar__ namespace.".to_string(),
+                    name: "mcp__calendar".to_string(),
+                    description: "Tools in the mcp__calendar namespace.".to_string(),
                     tools: vec![
                         ResponsesApiNamespaceTool::Function(ResponsesApiTool {
                             name: "create_event".to_string(),
@@ -400,7 +400,7 @@ mod tests {
         ToolInfo {
             server_name: server_name.to_string(),
             callable_name: tool_name.to_string(),
-            callable_namespace: format!("mcp__{server_name}__"),
+            callable_namespace: format!("mcp__{server_name}"),
             namespace_description: None,
             tool: Tool {
                 name: tool_name.to_string().into(),

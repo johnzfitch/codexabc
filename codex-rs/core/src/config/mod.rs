@@ -72,6 +72,7 @@ use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_login::AuthManagerConfig;
 use codex_mcp::BuiltinMcpServerOptions;
 use codex_mcp::McpConfig;
+use codex_mcp::McpToolNameMode;
 use codex_mcp::enabled_builtin_mcp_servers;
 use codex_memories_read::memory_root;
 use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
@@ -1138,10 +1139,17 @@ impl Config {
             codex_linux_sandbox_exe: self.codex_linux_sandbox_exe.clone(),
             use_legacy_landlock: self.features.use_legacy_landlock(),
             apps_enabled: self.features.enabled(Feature::Apps),
+            tool_name_mode: self.mcp_tool_name_mode(),
             configured_mcp_servers,
             builtin_mcp_servers,
             plugin_capability_summaries: loaded_plugins.capability_summaries().to_vec(),
         }
+    }
+
+    pub(crate) fn mcp_tool_name_mode(&self) -> McpToolNameMode {
+        McpToolNameMode::from_non_prefixed_feature(
+            self.features.enabled(Feature::NonPrefixedMcpToolNames),
+        )
     }
 
     pub async fn rebuild_preserving_session_layers(

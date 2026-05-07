@@ -24,6 +24,40 @@ impl McpHandler {
     pub fn new(tool_name: ToolName) -> Self {
         Self { tool_name }
     }
+
+    fn hook_tool_name(&self) -> HookToolName {
+        HookToolName::new_with_aliases(
+            mcp_hook_tool_name(&self.tool_name),
+            legacy_mcp_hook_matcher_alias(&self.tool_name),
+        )
+    }
+}
+
+fn mcp_hook_tool_name(tool_name: &ToolName) -> String {
+    match tool_name.namespace.as_deref() {
+        Some(namespace) if namespace.ends_with('_') || tool_name.name.starts_with('_') => {
+            format!("{namespace}{}", tool_name.name)
+        }
+        Some(namespace) => format!("{namespace}__{}", tool_name.name),
+        None => tool_name.name.clone(),
+    }
+}
+
+fn legacy_mcp_hook_matcher_alias(tool_name: &ToolName) -> Option<String> {
+    let Some(namespace) = tool_name.namespace.as_deref() else {
+        if tool_name.name.starts_with("mcp__") {
+            return None;
+        }
+        return Some(format!("mcp__{}", tool_name.name));
+    };
+
+    let namespace = namespace.strip_prefix("mcp__").unwrap_or(namespace);
+    let alias = if tool_name.name.starts_with('_') || namespace.ends_with('_') {
+        format!("mcp__{namespace}{}", tool_name.name)
+    } else {
+        format!("mcp__{namespace}__{}", tool_name.name)
+    };
+    (alias != mcp_hook_tool_name(tool_name)).then_some(alias)
 }
 
 impl ToolHandler for McpHandler {
@@ -43,7 +77,7 @@ impl ToolHandler for McpHandler {
         };
 
         Some(PreToolUsePayload {
-            tool_name: HookToolName::new(self.tool_name.display()),
+            tool_name: self.hook_tool_name(),
             tool_input: mcp_hook_tool_input(raw_arguments),
         })
     }
@@ -60,7 +94,7 @@ impl ToolHandler for McpHandler {
         let tool_response =
             result.post_tool_use_response(&invocation.call_id, &invocation.payload)?;
         Some(PostToolUsePayload {
-            tool_name: HookToolName::new(self.tool_name.display()),
+            tool_name: self.hook_tool_name(),
             tool_use_id: invocation.call_id.clone(),
             tool_input: result.tool_input.clone(),
             tool_response,
@@ -99,7 +133,7 @@ impl ToolHandler for McpHandler {
             call_id.clone(),
             server,
             tool,
-            self.tool_name.display(),
+            self.hook_tool_name(),
             arguments_str,
         )
         .await;
@@ -148,7 +182,7 @@ mod tests {
         };
         let (session, turn) = make_session_and_context().await;
         let handler = McpHandler::new(codex_tools::ToolName::namespaced(
-            "mcp__memory__",
+            "memory",
             "create_entities",
         ));
 
@@ -159,12 +193,15 @@ mod tests {
                 cancellation_token: tokio_util::sync::CancellationToken::new(),
                 tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
                 call_id: "call-mcp-pre".to_string(),
-                tool_name: codex_tools::ToolName::namespaced("mcp__memory__", "create_entities"),
+                tool_name: codex_tools::ToolName::namespaced("memory", "create_entities"),
                 source: ToolCallSource::Direct,
                 payload,
             }),
             Some(PreToolUsePayload {
-                tool_name: HookToolName::new("mcp__memory__create_entities"),
+                tool_name: HookToolName::new_with_aliases(
+                    "memory__create_entities",
+                    ["mcp__memory__create_entities"],
+                ),
                 tool_input: json!({
                     "entities": [{
                         "name": "Ada",
@@ -202,24 +239,24 @@ mod tests {
             truncation_policy: codex_utils_output_truncation::TruncationPolicy::Bytes(1024),
         };
         let (session, turn) = make_session_and_context().await;
-        let handler = McpHandler::new(codex_tools::ToolName::namespaced(
-            "mcp__filesystem__",
-            "read_file",
-        ));
+        let handler = McpHandler::new(codex_tools::ToolName::namespaced("filesystem", "read_file"));
         let invocation = ToolInvocation {
             session: session.into(),
             turn: turn.into(),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
             call_id: "call-mcp-post".to_string(),
-            tool_name: codex_tools::ToolName::namespaced("mcp__filesystem__", "read_file"),
+            tool_name: codex_tools::ToolName::namespaced("filesystem", "read_file"),
             source: ToolCallSource::Direct,
             payload,
         };
         assert_eq!(
             handler.post_tool_use_payload(&invocation, &output),
             Some(PostToolUsePayload {
-                tool_name: HookToolName::new("mcp__filesystem__read_file"),
+                tool_name: HookToolName::new_with_aliases(
+                    "filesystem__read_file",
+                    ["mcp__filesystem__read_file"],
+                ),
                 tool_use_id: "call-mcp-post".to_string(),
                 tool_input: json!({
                     "path": {

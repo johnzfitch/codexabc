@@ -76,7 +76,7 @@ fn numbered_mcp_tools(count: usize) -> Vec<ToolInfo> {
             make_mcp_tool(
                 "rmcp",
                 &tool_name,
-                "mcp__rmcp__",
+                "mcp__rmcp",
                 &tool_name,
                 /*connector_id*/ None,
                 /*connector_name*/ None,
@@ -200,7 +200,7 @@ async fn directly_exposes_explicit_apps_without_deferred_overlap() {
         "mcp__codex_apps__calendar",
         "_create_event"
     )));
-    assert!(deferred_tool_names.contains(&ToolName::namespaced("mcp__rmcp__", "tool_0")));
+    assert!(deferred_tool_names.contains(&ToolName::namespaced("mcp__rmcp", "tool_0")));
 }
 
 #[tokio::test]
@@ -215,7 +215,7 @@ async fn always_defer_feature_preserves_explicit_apps() {
         make_mcp_tool(
             "rmcp",
             "tool",
-            "mcp__rmcp__",
+            "mcp__rmcp",
             "tool",
             /*connector_id*/ None,
             /*connector_name*/ None,
@@ -252,7 +252,7 @@ async fn always_defer_feature_preserves_explicit_apps() {
         .as_ref()
         .expect("MCP tools should be discoverable through tool_search");
     let deferred_tool_names = tool_names(deferred_tools);
-    assert!(deferred_tool_names.contains(&ToolName::namespaced("mcp__rmcp__", "tool")));
+    assert!(deferred_tool_names.contains(&ToolName::namespaced("mcp__rmcp", "tool")));
     assert!(!deferred_tool_names.contains(&ToolName::namespaced(
         "mcp__codex_apps__calendar",
         "_create_event"

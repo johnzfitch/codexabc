@@ -32,9 +32,10 @@ use crate::runtime::McpRuntimeEnvironment;
 use crate::runtime::emit_duration;
 use crate::server::EffectiveMcpServer;
 use crate::server::McpServerMetadata;
+use crate::tools::McpToolNameMode;
 use crate::tools::ToolInfo;
 use crate::tools::filter_tools;
-use crate::tools::normalize_tools_for_model;
+use crate::tools::normalize_tools_for_model_with_mode;
 use crate::tools::tool_with_model_visible_input_schema;
 use anyhow::Context;
 use anyhow::Result;
@@ -73,6 +74,7 @@ pub struct McpConnectionManager {
     clients: HashMap<String, AsyncManagedClient>,
     server_metadata: HashMap<String, McpServerMetadata>,
     host_owned_codex_apps_enabled: bool,
+    tool_name_mode: McpToolNameMode,
     elicitation_requests: ElicitationRequestManager,
     startup_cancellation_token: CancellationToken,
 }
@@ -81,11 +83,13 @@ impl McpConnectionManager {
     pub fn new_uninitialized(
         approval_policy: &Constrained<AskForApproval>,
         permission_profile: &Constrained<PermissionProfile>,
+        tool_name_mode: McpToolNameMode,
     ) -> Self {
         Self {
             clients: HashMap::new(),
             server_metadata: HashMap::new(),
             host_owned_codex_apps_enabled: false,
+            tool_name_mode,
             elicitation_requests: ElicitationRequestManager::new(
                 approval_policy.value(),
                 permission_profile.get().clone(),
@@ -178,6 +182,7 @@ impl McpConnectionManager {
         codex_home: PathBuf,
         codex_apps_tools_cache_key: CodexAppsToolsCacheKey,
         host_owned_codex_apps_enabled: bool,
+        tool_name_mode: McpToolNameMode,
         tool_plugin_provenance: ToolPluginProvenance,
         auth: Option<&CodexAuth>,
         elicitation_reviewer: Option<ElicitationReviewerHandle>,
@@ -288,6 +293,7 @@ impl McpConnectionManager {
             clients,
             server_metadata,
             host_owned_codex_apps_enabled,
+            tool_name_mode,
             elicitation_requests: elicitation_requests.clone(),
             startup_cancellation_token: cancel_token.clone(),
         };
@@ -373,7 +379,7 @@ impl McpConnectionManager {
             };
             tools.extend(server_tools);
         }
-        normalize_tools_for_model(tools)
+        normalize_tools_for_model_with_mode(tools, self.tool_name_mode)
     }
 
     /// Force-refresh codex apps tools by bypassing the in-process cache.
@@ -424,7 +430,10 @@ impl McpConnectionManager {
                 tool.tool = tool_with_model_visible_input_schema(&tool.tool);
                 tool
             });
-        Ok(normalize_tools_for_model(tools))
+        Ok(normalize_tools_for_model_with_mode(
+            tools,
+            self.tool_name_mode,
+        ))
     }
 
     /// Returns a single map that contains all resources. Each key is the

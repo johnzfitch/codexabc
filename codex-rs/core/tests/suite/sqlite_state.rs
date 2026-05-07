@@ -330,7 +330,7 @@ async fn mcp_call_marks_thread_memory_mode_polluted_when_configured() -> Result<
     let server = start_mock_server().await;
     let call_id = "call-123";
     let server_name = "rmcp";
-    let namespace = format!("mcp__{server_name}__");
+    let namespace = format!("mcp__{server_name}");
     mount_sse_once(
         &server,
         responses::sse(vec![
@@ -453,7 +453,7 @@ async fn builtin_memories_mcp_call_does_not_mark_thread_memory_mode_polluted_whe
 -> Result<()> {
     let server = start_mock_server().await;
     let call_id = "call-123";
-    let namespace = format!("mcp__{MEMORIES_MCP_SERVER_NAME}__");
+    let namespace = format!("mcp__{MEMORIES_MCP_SERVER_NAME}");
     mount_sse_once(
         &server,
         responses::sse(vec![

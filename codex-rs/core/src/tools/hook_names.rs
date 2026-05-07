@@ -25,6 +25,26 @@ impl HookToolName {
         }
     }
 
+    /// Builds a hook tool name with compatibility matcher aliases.
+    pub(crate) fn new_with_aliases<I, S>(name: impl Into<String>, matcher_aliases: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let name = name.into();
+        let mut aliases = Vec::new();
+        for alias in matcher_aliases {
+            let alias = alias.into();
+            if alias != name && !aliases.contains(&alias) {
+                aliases.push(alias);
+            }
+        }
+        Self {
+            name,
+            matcher_aliases: aliases,
+        }
+    }
+
     /// Returns the hook identity for file edits performed through `apply_patch`.
     ///
     /// The serialized name remains `apply_patch` so logs and policies can key

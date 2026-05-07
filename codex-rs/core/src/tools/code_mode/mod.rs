@@ -315,7 +315,7 @@ async fn call_nested_tool(
                 Err(error) => return Err(FunctionCallError::RespondToModel(error)),
             };
             (
-                tool_info.canonical_tool_name(),
+                tool_name.clone(),
                 ToolPayload::Mcp {
                     server: tool_info.server_name,
                     tool: tool_info.tool.name.to_string(),

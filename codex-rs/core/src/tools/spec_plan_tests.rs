@@ -1271,15 +1271,15 @@ fn namespace_specs_are_hidden_when_namespace_tools_are_disabled() {
     let (tools, registry) = build_specs(
         &tools_config,
         Some(HashMap::from([(
-            ToolName::namespaced("mcp__sample__", "echo"),
+            ToolName::namespaced("mcp__sample", "echo"),
             mcp_tool("echo", "Echo", serde_json::json!({"type": "object"})),
         )])),
         /*deferred_mcp_tools*/ None,
         &[],
     );
 
-    assert_lacks_tool_name(&tools, "mcp__sample__");
-    assert!(registry.has_handler(&ToolName::namespaced("mcp__sample__", "echo")));
+    assert_lacks_tool_name(&tools, "mcp__sample");
+    assert!(registry.has_handler(&ToolName::namespaced("mcp__sample", "echo")));
 }
 
 #[test]
@@ -1445,7 +1445,7 @@ fn search_tool_description_lists_each_mcp_source_once() {
                 ),
             ),
             (
-                ToolName::namespaced("mcp__rmcp__", "echo"),
+                ToolName::namespaced("mcp__rmcp", "echo"),
                 mcp_tool("echo", "Echo", serde_json::json!({"type": "object"})),
             ),
         ])),
@@ -1473,7 +1473,7 @@ fn search_tool_description_lists_each_mcp_source_once() {
             ),
             deferred_mcp_tool(
                 "echo",
-                "mcp__rmcp__",
+                "mcp__rmcp",
                 "rmcp",
                 /*connector_name*/ None,
                 Some("Remote memory tools."),
@@ -1502,7 +1502,7 @@ fn search_tool_description_lists_each_mcp_source_once() {
         "mcp__codex_apps__calendar",
         "_create_event",
     )));
-    assert!(registry.has_handler(&ToolName::namespaced("mcp__rmcp__", "echo")));
+    assert!(registry.has_handler(&ToolName::namespaced("mcp__rmcp", "echo")));
 }
 
 #[test]
@@ -1956,7 +1956,7 @@ fn code_mode_augments_mcp_tool_descriptions_with_namespaced_sample() {
     let (tools, _) = build_specs(
         &tools_config,
         Some(HashMap::from([(
-            ToolName::namespaced("mcp__sample__", "echo"),
+            ToolName::namespaced("mcp__sample", "echo"),
             mcp_tool(
                 "echo",
                 "Echo text",
@@ -1975,7 +1975,7 @@ fn code_mode_augments_mcp_tool_descriptions_with_namespaced_sample() {
     );
 
     let ResponsesApiTool { description, .. } =
-        find_namespace_function_tool(&tools, "mcp__sample__", "echo");
+        find_namespace_function_tool(&tools, "mcp__sample", "echo");
 
     assert_eq!(
         description,
@@ -2009,7 +2009,7 @@ fn code_mode_preserves_nullable_and_literal_mcp_input_shapes() {
     let (tools, _) = build_specs(
         &tools_config,
         Some(HashMap::from([(
-            ToolName::namespaced("mcp__sample__", "fn"),
+            ToolName::namespaced("mcp__sample", "fn"),
             mcp_tool(
                 "fn",
                 "Sample fn",
@@ -2061,7 +2061,7 @@ fn code_mode_preserves_nullable_and_literal_mcp_input_shapes() {
     );
 
     let ResponsesApiTool { description, .. } =
-        find_namespace_function_tool(&tools, "mcp__sample__", "fn");
+        find_namespace_function_tool(&tools, "mcp__sample", "fn");
 
     assert!(description.contains(
         r#"exec tool declaration:
@@ -2352,7 +2352,7 @@ fn code_mode_augments_mcp_tool_descriptions_with_structured_output_sample() {
     let (tools, _) = build_specs(
         &tools_config,
         Some(HashMap::from([(
-            ToolName::namespaced("mcp__sample__", "echo"),
+            ToolName::namespaced("mcp__sample", "echo"),
             tool,
         )])),
         /*deferred_mcp_tools*/ None,
@@ -2360,7 +2360,7 @@ fn code_mode_augments_mcp_tool_descriptions_with_structured_output_sample() {
     );
 
     let ResponsesApiTool { description, .. } =
-        find_namespace_function_tool(&tools, "mcp__sample__", "echo");
+        find_namespace_function_tool(&tools, "mcp__sample", "echo");
 
     assert_eq!(
         description,

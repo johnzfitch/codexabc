@@ -39,6 +39,7 @@ use crate::codex_apps::codex_apps_tools_cache_key;
 use crate::connection_manager::McpConnectionManager;
 use crate::runtime::McpRuntimeEnvironment;
 use crate::server::EffectiveMcpServer;
+use crate::tools::McpToolNameMode;
 
 pub const CODEX_APPS_MCP_SERVER_NAME: &str = "codex_apps";
 const MCP_TOOL_NAME_PREFIX: &str = "mcp";
@@ -129,6 +130,8 @@ pub struct McpConfig {
     /// ChatGPT auth is checked separately at runtime before the built-in apps
     /// MCP server is added.
     pub apps_enabled: bool,
+    /// Model-visible naming mode for MCP tool namespaces.
+    pub tool_name_mode: McpToolNameMode,
     /// Config-backed MCP servers keyed by server name.
     ///
     /// Product-owned built-ins and runtime-only additions are merged later by
@@ -281,6 +284,7 @@ pub async fn read_mcp_resource(
         config.codex_home.clone(),
         codex_apps_tools_cache_key(auth),
         host_owned_codex_apps_enabled,
+        config.tool_name_mode,
         tool_plugin_provenance(config),
         auth,
         /*elicitation_reviewer*/ None,
@@ -349,6 +353,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
         config.codex_home.clone(),
         codex_apps_tools_cache_key(auth),
         host_owned_codex_apps_enabled,
+        config.tool_name_mode,
         tool_plugin_provenance,
         auth,
         /*elicitation_reviewer*/ None,

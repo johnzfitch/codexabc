@@ -1022,13 +1022,13 @@ async fn tool_search_indexes_only_enabled_non_app_mcp_tools() -> Result<()> {
         "non-app MCP tools should be hidden before search in large-search mode: {first_request_tools:?}"
     );
     assert!(
-        !first_request_tools.iter().any(|name| name == "mcp__rmcp__"),
+        !first_request_tools.iter().any(|name| name == "mcp__rmcp"),
         "non-app MCP namespace should be hidden before search in large-search mode: {first_request_tools:?}"
     );
 
     let echo_tools = tool_search_output_tools(&requests[1], echo_call_id);
     let echo_output = json!({ "tools": echo_tools });
-    let rmcp_echo_tool = namespace_child_tool(&echo_output, "mcp__rmcp__", "echo")
+    let rmcp_echo_tool = namespace_child_tool(&echo_output, "mcp__rmcp", "echo")
         .expect("tool_search should return rmcp echo as a namespace child tool");
     assert_eq!(
         rmcp_echo_tool.get("type").and_then(Value::as_str),
@@ -1038,7 +1038,7 @@ async fn tool_search_indexes_only_enabled_non_app_mcp_tools() -> Result<()> {
     let image_tools = tool_search_output_tools(&requests[1], image_call_id);
     let found_rmcp_image_tool = image_tools
         .iter()
-        .filter(|tool| tool.get("name").and_then(Value::as_str) == Some("mcp__rmcp__"))
+        .filter(|tool| tool.get("name").and_then(Value::as_str) == Some("mcp__rmcp"))
         .flat_map(|namespace| namespace.get("tools").and_then(Value::as_array))
         .flatten()
         .any(|tool| tool.get("name").and_then(Value::as_str).is_some());
@@ -1129,7 +1129,7 @@ async fn tool_search_uses_non_app_mcp_server_instructions_as_namespace_descripti
     let tools = tool_search_output_tools(&requests[1], search_call_id);
     let rmcp_namespace = tools
         .iter()
-        .find(|tool| tool.get("name").and_then(Value::as_str) == Some("mcp__rmcp__"))
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some("mcp__rmcp"))
         .expect("tool_search should return the rmcp namespace");
     assert_eq!(
         rmcp_namespace.get("description").and_then(Value::as_str),

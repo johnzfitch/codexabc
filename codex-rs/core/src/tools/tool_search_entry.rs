@@ -3,6 +3,7 @@ use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_tools::LoadableToolSpec;
 use codex_tools::ToolSearchResultSource;
 use codex_tools::ToolsConfig;
+use codex_tools::code_mode_name_for_tool_name;
 use codex_tools::dynamic_tool_to_loadable_tool_spec;
 use codex_tools::tool_search_result_source_to_loadable_tool_spec;
 
@@ -22,7 +23,13 @@ pub(crate) fn build_tool_search_entries(
     let mut mcp_tools = mcp_tools
         .map(|tools| tools.iter().collect::<Vec<_>>())
         .unwrap_or_default();
-    mcp_tools.sort_by_key(|info| info.canonical_tool_name().display());
+    mcp_tools.sort_by(|left, right| {
+        let left = left.canonical_tool_name();
+        let right = right.canonical_tool_name();
+        left.namespace
+            .cmp(&right.namespace)
+            .then(left.name.cmp(&right.name))
+    });
     for info in mcp_tools {
         match mcp_tool_search_entry(info) {
             Ok(entry) => entries.push(entry),
@@ -71,12 +78,14 @@ pub(crate) fn build_tool_search_entries_for_config(
 }
 
 fn mcp_tool_search_entry(info: &ToolInfo) -> Result<ToolSearchEntry, serde_json::Error> {
+    let tool_name = info.canonical_tool_name();
+    let tool_namespace = tool_name.namespace.as_deref().unwrap_or_default();
     Ok(ToolSearchEntry {
-        search_text: build_mcp_search_text(info),
+        search_text: build_mcp_search_text(info, &tool_name),
         output: tool_search_result_source_to_loadable_tool_spec(ToolSearchResultSource {
             server_name: info.server_name.as_str(),
-            tool_namespace: info.callable_namespace.as_str(),
-            tool_name: info.callable_name.as_str(),
+            tool_namespace,
+            tool_name: tool_name.name.as_str(),
             tool: &info.tool,
             connector_name: info.connector_name.as_deref(),
             description: info.namespace_description.as_deref(),
@@ -93,9 +102,9 @@ fn dynamic_tool_search_entry(tool: &DynamicToolSpec) -> Result<ToolSearchEntry, 
     })
 }
 
-fn build_mcp_search_text(info: &ToolInfo) -> String {
+fn build_mcp_search_text(info: &ToolInfo, tool_name: &codex_tools::ToolName) -> String {
     let mut parts = vec![
-        info.canonical_tool_name().display(),
+        code_mode_name_for_tool_name(tool_name),
         info.callable_name.clone(),
         info.tool.name.to_string(),
         info.server_name.clone(),

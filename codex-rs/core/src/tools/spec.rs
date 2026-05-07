@@ -42,23 +42,38 @@ fn map_mcp_tools_for_plan(mcp_tools: &[ToolInfo]) -> McpToolPlanInputs<'_> {
     McpToolPlanInputs {
         mcp_tools: mcp_tools
             .iter()
-            .map(|tool| ToolRegistryBuildMcpTool {
-                name: tool.canonical_tool_name(),
-                tool: &tool.tool,
+            .map(|tool| {
+                let name = tool.canonical_tool_name();
+                ToolRegistryBuildMcpTool {
+                    name,
+                    tool: &tool.tool,
+                }
             })
             .collect(),
         tool_namespaces: mcp_tools
             .iter()
-            .map(|tool| {
-                (
-                    tool.callable_namespace.clone(),
+            .filter_map(|tool| {
+                let name = tool.canonical_tool_name();
+                let namespace = name.namespace?;
+                Some((
+                    namespace.clone(),
                     ToolNamespace {
-                        name: tool.callable_namespace.clone(),
+                        name: namespace,
                         description: tool.namespace_description.clone(),
                     },
-                )
+                ))
             })
             .collect(),
+    }
+}
+
+fn unavailable_tool_function_name(tool_name: &ToolName) -> String {
+    match tool_name.namespace.as_deref() {
+        Some(namespace) if namespace.ends_with('_') || tool_name.name.starts_with('_') => {
+            format!("{namespace}{}", tool_name.name)
+        }
+        Some(namespace) => format!("{namespace}__{}", tool_name.name),
+        None => tool_name.name.clone(),
     }
 }
 
@@ -78,11 +93,14 @@ pub(crate) fn build_specs_with_discoverable_tools(
     let deferred_mcp_tool_sources = deferred_mcp_tools.as_ref().map(|tools| {
         tools
             .iter()
-            .map(|tool| ToolRegistryBuildDeferredTool {
-                name: tool.canonical_tool_name(),
-                server_name: tool.server_name.as_str(),
-                connector_name: tool.connector_name.as_deref(),
-                description: tool.namespace_description.as_deref(),
+            .map(|tool| {
+                let name = tool.canonical_tool_name();
+                ToolRegistryBuildDeferredTool {
+                    name,
+                    server_name: tool.server_name.as_str(),
+                    connector_name: tool.connector_name.as_deref(),
+                    description: tool.namespace_description.as_deref(),
+                }
             })
             .collect::<Vec<_>>()
     });
@@ -136,7 +154,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
         .collect::<HashSet<_>>();
 
     for unavailable_tool in unavailable_called_tools {
-        let tool_name = unavailable_tool.display();
+        let tool_name = unavailable_tool_function_name(&unavailable_tool);
         if existing_spec_names.insert(tool_name.clone()) {
             let spec = codex_tools::ToolSpec::Function(ResponsesApiTool {
                 name: tool_name.clone(),

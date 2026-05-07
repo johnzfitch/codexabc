@@ -61,7 +61,7 @@ fn mcp_tool_info(tool: rmcp::model::Tool) -> ToolInfo {
     ToolInfo {
         server_name: "test_server".to_string(),
         callable_name: tool.name.to_string(),
-        callable_namespace: "mcp__test_server__".to_string(),
+        callable_namespace: "mcp__test_server".to_string(),
         namespace_description: None,
         tool,
         connector_id: None,
@@ -131,7 +131,7 @@ fn deferred_responses_api_tool_serializes_with_defer_loading() {
 
     let serialized = serde_json::to_value(ToolSpec::Function(
         mcp_tool_to_deferred_responses_api_tool(
-            &ToolName::namespaced("mcp__codex_apps__", "lookup_order"),
+            &ToolName::namespaced("mcp__codex_apps", "lookup_order"),
             &tool,
         )
         .expect("convert deferred tool"),
@@ -434,6 +434,7 @@ async fn test_build_specs_gpt51_codex_default() {
 async fn test_build_specs_gpt5_codex_unified_exec_web_search() {
     let mut features = Features::with_defaults();
     features.enable(Feature::UnifiedExec);
+    features.enable(Feature::NonPrefixedMcpToolNames);
     assert_model_tools(
         "gpt-5.4",
         &features,
@@ -461,6 +462,7 @@ async fn test_build_specs_gpt5_codex_unified_exec_web_search() {
 async fn test_build_specs_gpt51_codex_unified_exec_web_search() {
     let mut features = Features::with_defaults();
     features.enable(Feature::UnifiedExec);
+    features.enable(Feature::NonPrefixedMcpToolNames);
     assert_model_tools(
         "gpt-5.4",
         &features,
@@ -969,7 +971,7 @@ async fn search_tool_registers_namespaced_mcp_tool_aliases() {
             ToolInfo {
                 server_name: "rmcp".to_string(),
                 callable_name: "echo".to_string(),
-                callable_namespace: "mcp__rmcp__".to_string(),
+                callable_namespace: "mcp__rmcp".to_string(),
                 namespace_description: None,
                 tool: mcp_tool("echo", "Echo", serde_json::json!({"type": "object"})),
                 connector_id: None,
@@ -982,7 +984,7 @@ async fn search_tool_registers_namespaced_mcp_tool_aliases() {
     .build();
 
     let app_alias = ToolName::namespaced("mcp__codex_apps__calendar", "_create_event");
-    let mcp_alias = ToolName::namespaced("mcp__rmcp__", "echo");
+    let mcp_alias = ToolName::namespaced("mcp__rmcp", "echo");
 
     assert!(registry.has_handler(&ToolName::plain(TOOL_SEARCH_TOOL_NAME)));
     assert!(registry.has_handler(&app_alias));
@@ -1072,7 +1074,7 @@ async fn direct_mcp_tools_register_namespaced_handlers() {
     )
     .build();
 
-    assert!(registry.has_handler(&ToolName::namespaced("mcp__test_server__", "echo")));
+    assert!(registry.has_handler(&ToolName::namespaced("mcp__test_server", "echo")));
     assert!(!registry.has_handler(&ToolName::plain("mcp__test_server__echo")));
 }
 
@@ -1131,6 +1133,7 @@ async fn test_mcp_tool_property_missing_type_defaults_to_string() {
     let model_info = construct_model_info_offline("gpt-5.4", &config);
     let mut features = Features::with_defaults();
     features.enable(Feature::UnifiedExec);
+    features.enable(Feature::NonPrefixedMcpToolNames);
     let available_models = Vec::new();
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_info: &model_info,
@@ -1191,6 +1194,7 @@ async fn test_mcp_tool_preserves_integer_schema() {
     let model_info = construct_model_info_offline("gpt-5.4", &config);
     let mut features = Features::with_defaults();
     features.enable(Feature::UnifiedExec);
+    features.enable(Feature::NonPrefixedMcpToolNames);
     let available_models = Vec::new();
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_info: &model_info,
@@ -1249,6 +1253,7 @@ async fn test_mcp_tool_array_without_items_gets_default_string_items() {
     let model_info = construct_model_info_offline("gpt-5.4", &config);
     let mut features = Features::with_defaults();
     features.enable(Feature::UnifiedExec);
+    features.enable(Feature::NonPrefixedMcpToolNames);
     features.enable(Feature::ApplyPatchFreeform);
     let available_models = Vec::new();
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
@@ -1311,6 +1316,7 @@ async fn test_mcp_tool_anyof_defaults_to_string() {
     let model_info = construct_model_info_offline("gpt-5.4", &config);
     let mut features = Features::with_defaults();
     features.enable(Feature::UnifiedExec);
+    features.enable(Feature::NonPrefixedMcpToolNames);
     let available_models = Vec::new();
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_info: &model_info,
@@ -1377,6 +1383,7 @@ async fn test_get_openai_tools_mcp_tools_with_additional_properties_schema() {
     let model_info = construct_model_info_offline("gpt-5.4", &config);
     let mut features = Features::with_defaults();
     features.enable(Feature::UnifiedExec);
+    features.enable(Feature::NonPrefixedMcpToolNames);
     let available_models = Vec::new();
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_info: &model_info,

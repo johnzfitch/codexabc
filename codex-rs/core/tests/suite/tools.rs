@@ -214,7 +214,7 @@ async fn historical_unavailable_mcp_call_is_exposed_as_placeholder_tool() -> Res
     let historical_call_id = "historical-mcp-call";
     let retry_call_id = "retry-mcp-call";
     let server_name = "rmcp";
-    let unavailable_tool_namespace = "mcp__rmcp__";
+    let unavailable_tool_namespace = "mcp__rmcp";
     let unavailable_tool_name = "echo";
     let unavailable_tool_display_name = "mcp__rmcp__echo";
     let server = start_mock_server().await;

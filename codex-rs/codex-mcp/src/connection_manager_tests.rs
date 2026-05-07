@@ -11,6 +11,7 @@ use crate::rmcp_client::AsyncManagedClient;
 use crate::rmcp_client::ManagedClient;
 use crate::rmcp_client::StartupOutcomeError;
 use crate::rmcp_client::elicitation_capability_for_server;
+use crate::tools::McpToolNameMode;
 use crate::tools::ToolFilter;
 use crate::tools::ToolInfo;
 use crate::tools::filter_tools;
@@ -36,11 +37,10 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 fn create_test_tool(server_name: &str, tool_name: &str) -> ToolInfo {
-    let tool_namespace = format!("mcp__{server_name}__");
     ToolInfo {
         server_name: server_name.to_string(),
         callable_name: tool_name.to_string(),
-        callable_namespace: tool_namespace,
+        callable_namespace: server_name.to_string(),
         namespace_description: None,
         tool: Tool {
             name: tool_name.to_string().into(),
@@ -291,8 +291,8 @@ fn test_normalize_tools_short_non_duplicated_names() {
     assert_eq!(
         model_tool_names(&model_tools),
         HashSet::from([
-            ToolName::namespaced("mcp__server1__", "tool1"),
-            ToolName::namespaced("mcp__server1__", "tool2")
+            ToolName::namespaced("server1", "tool1"),
+            ToolName::namespaced("server1", "tool2")
         ])
     );
 }
@@ -309,7 +309,7 @@ fn test_normalize_tools_duplicated_names_skipped() {
     // Only the first tool should remain, the second is skipped
     assert_eq!(
         model_tool_names(&model_tools),
-        HashSet::from([ToolName::namespaced("mcp__server1__", "duplicate_tool")])
+        HashSet::from([ToolName::namespaced("server1", "duplicate_tool")])
     );
 }
 
@@ -334,16 +334,26 @@ fn test_normalize_tools_long_names_same_server() {
 
     let names = model_tool_names(&model_tools);
 
-    assert!(names.iter().all(|name| name.display().len() == 64));
     assert!(
         names
             .iter()
-            .all(|name| name.namespace.as_deref() == Some("mcp__my_server__"))
+            .all(|name| name.namespace.as_ref().expect("namespaced").len()
+                + "__".len()
+                + name.name.len()
+                == 64)
+    );
+    assert!(
+        names
+            .iter()
+            .all(|name| name.namespace.as_deref() == Some("my_server"))
     );
     assert!(
         names.iter().all(|name| name
-            .display()
+            .namespace
+            .as_deref()
+            .expect("namespaced")
             .chars()
+            .chain(name.name.chars())
             .all(|c| c.is_ascii_alphanumeric() || c == '_')),
         "model-visible names must be code-mode compatible: {names:?}"
     );
@@ -360,24 +370,33 @@ fn test_normalize_tools_sanitizes_invalid_characters() {
     let model_name = tool.canonical_tool_name();
     assert_eq!(
         model_name,
-        ToolName::namespaced("mcp__server_one__", "tool_two_three")
+        ToolName::namespaced("server_one", "tool_two_three")
     );
     assert_eq!(
-        format!("{}{}", tool.callable_namespace, tool.callable_name),
-        model_name.display()
+        (
+            tool.callable_namespace.as_str(),
+            tool.callable_name.as_str()
+        ),
+        (
+            model_name.namespace.as_deref().expect("namespaced"),
+            model_name.name.as_str()
+        )
     );
 
     // The callable parts are sanitized for model-visible tool calls, but the raw
     // MCP name is preserved for the actual MCP call.
     assert_eq!(tool.server_name, "server.one");
-    assert_eq!(tool.callable_namespace, "mcp__server_one__");
+    assert_eq!(tool.callable_namespace, "server_one");
     assert_eq!(tool.callable_name, "tool_two_three");
     assert_eq!(tool.tool.name, "tool.two-three");
 
     assert!(
         model_name
-            .display()
+            .namespace
+            .as_deref()
+            .expect("namespaced")
             .chars()
+            .chain(model_name.name.chars())
             .all(|c| c.is_ascii_alphanumeric() || c == '_'),
         "model-visible name must be code-mode compatible: {model_name:?}"
     );
@@ -393,9 +412,9 @@ fn test_normalize_tools_keeps_hyphenated_mcp_tools_callable() {
     let tool = model_tools.into_iter().next().expect("one tool");
     assert_eq!(
         tool.canonical_tool_name(),
-        ToolName::namespaced("mcp__music_studio__", "get_strudel_guide")
+        ToolName::namespaced("music_studio", "get_strudel_guide")
     );
-    assert_eq!(tool.callable_namespace, "mcp__music_studio__");
+    assert_eq!(tool.callable_namespace, "music_studio");
     assert_eq!(tool.callable_name, "get_strudel_guide");
     assert_eq!(tool.tool.name, "get-strudel-guide");
 }
@@ -426,8 +445,11 @@ fn test_normalize_tools_disambiguates_sanitized_namespace_collisions() {
     let model_names = model_tool_names(&model_tools);
     assert!(
         model_names.iter().all(|name| name
-            .display()
+            .namespace
+            .as_deref()
+            .expect("namespaced")
             .chars()
+            .chain(name.name.chars())
             .all(|c| c.is_ascii_alphanumeric() || c == '_')),
         "model-visible names must be code-mode compatible: {model_names:?}"
     );
@@ -686,8 +708,11 @@ async fn list_all_tools_uses_startup_snapshot_while_client_is_pending() {
         .shared();
     let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
-    let mut manager =
-        McpConnectionManager::new_uninitialized(&approval_policy, &permission_profile);
+    let mut manager = McpConnectionManager::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        McpToolNameMode::NonPrefixed,
+    );
     manager.clients.insert(
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
@@ -704,7 +729,7 @@ async fn list_all_tools_uses_startup_snapshot_while_client_is_pending() {
         .iter()
         .find(|tool| {
             tool.canonical_tool_name()
-                == ToolName::namespaced("mcp__codex_apps__", "calendar_create_event")
+                == ToolName::namespaced("codex_apps", "calendar_create_event")
         })
         .expect("tool from startup cache");
     assert_eq!(tool.server_name, CODEX_APPS_MCP_SERVER_NAME);
@@ -719,8 +744,11 @@ async fn resolve_tool_info_accepts_canonical_namespaced_tool_names() {
         .shared();
     let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
-    let mut manager =
-        McpConnectionManager::new_uninitialized(&approval_policy, &permission_profile);
+    let mut manager = McpConnectionManager::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        McpToolNameMode::NonPrefixed,
+    );
     manager.clients.insert(
         "rmcp".to_string(),
         AsyncManagedClient {
@@ -733,11 +761,52 @@ async fn resolve_tool_info_accepts_canonical_namespaced_tool_names() {
     );
 
     let tool = manager
-        .resolve_tool_info(&ToolName::namespaced("mcp__rmcp__", "echo"))
+        .resolve_tool_info(&ToolName::namespaced("rmcp", "echo"))
         .await
         .expect("split MCP tool namespace and name should resolve");
 
-    let expected = ("rmcp", "mcp__rmcp__", "echo", "echo");
+    let expected = ("rmcp", "rmcp", "echo", "echo");
+    assert_eq!(
+        (
+            tool.server_name.as_str(),
+            tool.callable_namespace.as_str(),
+            tool.callable_name.as_str(),
+            tool.tool.name.as_ref(),
+        ),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn list_all_tools_applies_legacy_mcp_prefix_from_manager_mode() {
+    let startup_tools = vec![create_test_tool("rmcp", "echo")];
+    let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
+        .boxed()
+        .shared();
+    let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
+    let permission_profile = Constrained::allow_any(PermissionProfile::default());
+    let mut manager = McpConnectionManager::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        McpToolNameMode::LegacyPrefixed,
+    );
+    manager.clients.insert(
+        "rmcp".to_string(),
+        AsyncManagedClient {
+            client: pending_client,
+            startup_snapshot: Some(startup_tools),
+            startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
+            cancel_token: CancellationToken::new(),
+        },
+    );
+
+    let tool = manager
+        .resolve_tool_info(&ToolName::namespaced("mcp__rmcp", "echo"))
+        .await
+        .expect("legacy-prefixed MCP tool name should resolve");
+
+    let expected = ("rmcp", "mcp__rmcp", "echo", "echo");
     assert_eq!(
         (
             tool.server_name.as_str(),
@@ -756,8 +825,11 @@ async fn list_all_tools_blocks_while_client_is_pending_without_startup_snapshot(
         .shared();
     let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
-    let mut manager =
-        McpConnectionManager::new_uninitialized(&approval_policy, &permission_profile);
+    let mut manager = McpConnectionManager::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        McpToolNameMode::NonPrefixed,
+    );
     manager.clients.insert(
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
@@ -781,8 +853,11 @@ async fn list_all_tools_does_not_block_when_startup_snapshot_cache_hit_is_empty(
         .shared();
     let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
-    let mut manager =
-        McpConnectionManager::new_uninitialized(&approval_policy, &permission_profile);
+    let mut manager = McpConnectionManager::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        McpToolNameMode::NonPrefixed,
+    );
     manager.clients.insert(
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
@@ -815,8 +890,11 @@ async fn list_all_tools_uses_startup_snapshot_when_client_startup_fails() {
     .shared();
     let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
-    let mut manager =
-        McpConnectionManager::new_uninitialized(&approval_policy, &permission_profile);
+    let mut manager = McpConnectionManager::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        McpToolNameMode::NonPrefixed,
+    );
     let startup_complete = Arc::new(std::sync::atomic::AtomicBool::new(true));
     manager.clients.insert(
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
@@ -834,7 +912,7 @@ async fn list_all_tools_uses_startup_snapshot_when_client_startup_fails() {
         .iter()
         .find(|tool| {
             tool.canonical_tool_name()
-                == ToolName::namespaced("mcp__codex_apps__", "calendar_create_event")
+                == ToolName::namespaced("codex_apps", "calendar_create_event")
         })
         .expect("tool from startup cache");
     assert_eq!(tool.server_name, CODEX_APPS_MCP_SERVER_NAME);
