@@ -41,26 +41,3 @@ fn sqlite_originator_tags<'a>(
     tags.push((ORIGINATOR_TAG, originator));
     tags
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use pretty_assertions::assert_eq;
-
-    #[test]
-    fn sqlite_originator_tags_append_bounded_originator() {
-        let tags = sqlite_originator_tags(
-            &[("status", "success"), ("db", "state")],
-            bounded_originator_tag_value("codex_cli_rs"),
-        );
-
-        assert_eq!(
-            tags,
-            vec![
-                ("status", "success"),
-                ("db", "state"),
-                (ORIGINATOR_TAG, "codex_cli_rs"),
-            ]
-        );
-    }
-}

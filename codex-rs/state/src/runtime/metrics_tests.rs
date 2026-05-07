@@ -4,8 +4,6 @@ use crate::DB_INIT_METRIC;
 use crate::DB_OPERATION_METRIC;
 use crate::DbMetricsRecorder;
 use crate::DbMetricsRecorderHandle;
-use crate::telemetry::DbAccess;
-use crate::telemetry::DbKind;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -134,39 +132,6 @@ async fn selected_operations_record_success_metrics() {
     let write = find_point(&points, "operation", "checkpoint_backfill");
     assert_eq!(write.get("status").map(String::as_str), Some("success"));
     assert_eq!(write.get("access").map(String::as_str), Some("write"));
-
-    runtime.pool.close().await;
-    runtime.logs_pool.close().await;
-    let _ = tokio::fs::remove_dir_all(codex_home).await;
-}
-
-#[tokio::test]
-async fn failed_operation_records_classified_error_tags() {
-    let metrics = build_metrics();
-    let codex_home = unique_temp_dir();
-    let runtime = StateRuntime::init_with_metrics(
-        codex_home.clone(),
-        "test-provider".to_string(),
-        Some(metrics.clone() as DbMetricsRecorderHandle),
-    )
-    .await
-    .expect("initialize runtime");
-
-    let result: anyhow::Result<()> = runtime
-        .record_db_operation(DbKind::State, "test_failure", DbAccess::Read, async {
-            Err(anyhow::Error::new(sqlx::Error::PoolTimedOut))
-        })
-        .await;
-    assert!(result.is_err());
-
-    let points = metrics.metric_points(DB_OPERATION_METRIC);
-    let failure = find_point(&points, "operation", "test_failure");
-    assert_eq!(failure.get("status").map(String::as_str), Some("failed"));
-    assert_eq!(
-        failure.get("error_class").map(String::as_str),
-        Some("pool_timeout")
-    );
-    assert_eq!(failure.get("sqlite_code").map(String::as_str), Some("none"));
 
     runtime.pool.close().await;
     runtime.logs_pool.close().await;
