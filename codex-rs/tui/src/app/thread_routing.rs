@@ -616,13 +616,20 @@ impl App {
                 Ok(true)
             }
             AppCommand::ListSkills { cwds, force_reload } => {
+                let local_path_base = cwds
+                    .first()
+                    .map(std::path::PathBuf::as_path)
+                    .unwrap_or_else(|| self.config.cwd.as_path());
                 self.handle_skills_list_result(
                     app_server
-                        .skills_list(codex_app_server_protocol::SkillsListParams {
-                            cwds: cwds.clone(),
-                            force_reload: *force_reload,
-                            per_cwd_extra_user_roots: None,
-                        })
+                        .skills_list(
+                            codex_app_server_protocol::SkillsListParams {
+                                cwds: cwds.clone(),
+                                force_reload: *force_reload,
+                                per_cwd_extra_user_roots: None,
+                            },
+                            local_path_base,
+                        )
                         .await,
                     "failed to refresh skills",
                 );

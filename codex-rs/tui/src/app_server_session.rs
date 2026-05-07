@@ -120,10 +120,47 @@ use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 
 fn bootstrap_request_error(context: &'static str, err: TypedRequestError) -> color_eyre::Report {
     color_eyre::eyre::eyre!("{context}: {err}")
+}
+
+async fn request_typed_with_local_path_base<T>(
+    client: &AppServerClient,
+    is_remote: bool,
+    method: &'static str,
+    request: ClientRequest,
+    local_path_base: &Path,
+) -> std::result::Result<T, TypedRequestError>
+where
+    T: DeserializeOwned,
+{
+    if !is_remote {
+        return client.request_typed(request).await;
+    }
+
+    let response =
+        client
+            .request(request)
+            .await
+            .map_err(|source| TypedRequestError::Transport {
+                method: method.to_string(),
+                source,
+            })?;
+    let result = response.map_err(|source| TypedRequestError::Server {
+        method: method.to_string(),
+        source,
+    })?;
+    let path_base_guard = AbsolutePathBufGuard::new(local_path_base);
+    let response =
+        serde_json::from_value(result).map_err(|source| TypedRequestError::Deserialize {
+            method: method.to_string(),
+            source,
+        })?;
+    drop(path_base_guard);
+    Ok(response)
 }
 
 /// Data collected during the TUI bootstrap phase that the main event loop
@@ -150,7 +187,32 @@ pub(crate) struct AppServerBootstrap {
 pub(crate) struct AppServerSession {
     client: AppServerClient,
     next_request_id: i64,
-    remote_cwd_override: Option<PathBuf>,
+    remote_cwds: RemoteCwds,
+}
+
+#[derive(Default)]
+struct RemoteCwds {
+    explicit_cwd: Option<PathBuf>,
+    by_thread: HashMap<ThreadId, PathBuf>,
+}
+
+impl RemoteCwds {
+    fn with_explicit_cwd(mut self, explicit_cwd: Option<PathBuf>) -> Self {
+        self.explicit_cwd = explicit_cwd;
+        self
+    }
+
+    fn explicit_cwd(&self) -> Option<&std::path::Path> {
+        self.explicit_cwd.as_deref()
+    }
+
+    fn cwd_for_thread(&self, thread_id: &ThreadId) -> Option<&std::path::Path> {
+        self.by_thread.get(thread_id).map(PathBuf::as_path)
+    }
+
+    fn record_thread_cwd(&mut self, thread_id: ThreadId, cwd: PathBuf) {
+        self.by_thread.insert(thread_id, cwd);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -178,17 +240,17 @@ impl AppServerSession {
         Self {
             client,
             next_request_id: 1,
-            remote_cwd_override: None,
+            remote_cwds: RemoteCwds::default(),
         }
     }
 
     pub(crate) fn with_remote_cwd_override(mut self, remote_cwd_override: Option<PathBuf>) -> Self {
-        self.remote_cwd_override = remote_cwd_override;
+        self.remote_cwds = self.remote_cwds.with_explicit_cwd(remote_cwd_override);
         self
     }
 
     pub(crate) fn remote_cwd_override(&self) -> Option<&std::path::Path> {
-        self.remote_cwd_override.as_deref()
+        self.remote_cwds.explicit_cwd()
     }
 
     pub(crate) fn is_remote(&self) -> bool {
@@ -347,7 +409,7 @@ impl AppServerSession {
                     params: thread_start_params_from_config(
                         config,
                         thread_params_mode,
-                        self.remote_cwd_override.as_deref(),
+                        self.remote_cwds.explicit_cwd(),
                         session_start_source,
                     ),
                 },
@@ -376,7 +438,7 @@ impl AppServerSession {
                         config.clone(),
                         thread_id,
                         thread_params_mode,
-                        self.remote_cwd_override.as_deref(),
+                        self.remote_cwds.cwd_for_thread(&thread_id),
                     ),
                 },
                 &config,
@@ -410,7 +472,7 @@ impl AppServerSession {
                         config.clone(),
                         thread_id,
                         thread_params_mode,
-                        self.remote_cwd_override.as_deref(),
+                        self.remote_cwds.cwd_for_thread(&thread_id),
                     ),
                 },
                 &config,
@@ -462,6 +524,9 @@ impl AppServerSession {
             .is_remote()
             .then(|| thread_lifecycle_response_cwd(&result))
             .flatten();
+        let raw_thread_id = raw_cwd
+            .as_ref()
+            .and_then(|_| thread_lifecycle_response_thread_id(&result));
         let path_base_guard = AbsolutePathBufGuard::new(config.cwd.as_path());
         let response =
             serde_json::from_value(result).map_err(|source| TypedRequestError::Deserialize {
@@ -469,8 +534,17 @@ impl AppServerSession {
                 source,
             })?;
         drop(path_base_guard);
-        if let Some(raw_cwd) = raw_cwd {
-            self.remote_cwd_override = Some(raw_cwd);
+        if let (Some(raw_thread_id), Some(raw_cwd)) = (raw_thread_id, raw_cwd) {
+            match ThreadId::from_string(&raw_thread_id) {
+                Ok(thread_id) => self.remote_cwds.record_thread_cwd(thread_id, raw_cwd),
+                Err(err) => {
+                    tracing::warn!(
+                        thread_id = %raw_thread_id,
+                        %err,
+                        "Failed to record remote cwd for app-server thread"
+                    );
+                }
+            }
         }
         Ok(response)
     }
@@ -589,37 +663,35 @@ impl AppServerSession {
         output_schema: Option<serde_json::Value>,
     ) -> Result<TurnStartResponse> {
         let request_id = self.next_request_id();
-        let cwd_for_request = self.remote_cwd_override.clone().unwrap_or(cwd);
-        let (sandbox_policy, permissions) = turn_permissions_overrides(
+        let local_path_base = cwd.clone();
+        let remote_cwd = self.remote_cwds.cwd_for_thread(&thread_id);
+        let params = turn_start_params(
+            thread_id,
+            items,
+            cwd,
             &permission_profile,
             active_permission_profile,
-            cwd_for_request.as_path(),
             self.thread_params_mode(),
+            remote_cwd,
+            approval_policy,
+            approvals_reviewer,
+            model,
+            effort,
+            summary,
+            service_tier,
+            collaboration_mode,
+            personality,
+            output_schema,
         );
-        self.client
-            .request_typed(ClientRequest::TurnStart {
-                request_id,
-                params: TurnStartParams {
-                    thread_id: thread_id.to_string(),
-                    input: items,
-                    responsesapi_client_metadata: None,
-                    environments: None,
-                    cwd: Some(cwd_for_request),
-                    approval_policy: Some(approval_policy),
-                    approvals_reviewer: Some(approvals_reviewer.into()),
-                    sandbox_policy,
-                    permissions,
-                    model: Some(model),
-                    service_tier,
-                    effort,
-                    summary,
-                    personality,
-                    output_schema,
-                    collaboration_mode,
-                },
-            })
-            .await
-            .wrap_err("turn/start failed in TUI")
+        request_typed_with_local_path_base(
+            &self.client,
+            self.is_remote(),
+            "turn/start",
+            ClientRequest::TurnStart { request_id, params },
+            local_path_base.as_path(),
+        )
+        .await
+        .wrap_err("turn/start failed in TUI")
     }
 
     pub(crate) async fn turn_interrupt(
@@ -915,12 +987,18 @@ impl AppServerSession {
     pub(crate) async fn skills_list(
         &mut self,
         params: SkillsListParams,
+        local_path_base: &Path,
     ) -> Result<SkillsListResponse> {
         let request_id = self.next_request_id();
-        self.client
-            .request_typed(ClientRequest::SkillsList { request_id, params })
-            .await
-            .wrap_err("skills/list failed in TUI")
+        request_typed_with_local_path_base(
+            &self.client,
+            self.is_remote(),
+            "skills/list",
+            ClientRequest::SkillsList { request_id, params },
+            local_path_base,
+        )
+        .await
+        .wrap_err("skills/list failed in TUI")
     }
 
     pub(crate) async fn reload_user_config(&mut self) -> Result<()> {
@@ -1349,6 +1427,69 @@ fn thread_lifecycle_response_cwd(result: &serde_json::Value) -> Option<PathBuf> 
         .map(PathBuf::from)
 }
 
+fn thread_lifecycle_response_thread_id(result: &serde_json::Value) -> Option<String> {
+    result
+        .get("thread")
+        .and_then(|thread| thread.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|thread_id| !thread_id.is_empty())
+        .map(ToString::to_string)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "turn/start mirrors the app-server request shape"
+)]
+fn turn_start_params(
+    thread_id: ThreadId,
+    items: Vec<UserInput>,
+    cwd: PathBuf,
+    permission_profile: &PermissionProfile,
+    active_permission_profile: Option<ActivePermissionProfile>,
+    thread_params_mode: ThreadParamsMode,
+    remote_cwd: Option<&Path>,
+    approval_policy: AskForApproval,
+    approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer,
+    model: String,
+    effort: Option<codex_protocol::openai_models::ReasoningEffort>,
+    summary: Option<codex_protocol::config_types::ReasoningSummary>,
+    service_tier: Option<Option<String>>,
+    collaboration_mode: Option<codex_protocol::config_types::CollaborationMode>,
+    personality: Option<codex_protocol::config_types::Personality>,
+    output_schema: Option<serde_json::Value>,
+) -> TurnStartParams {
+    let permission_cwd = remote_cwd.unwrap_or(cwd.as_path());
+    let (sandbox_policy, permissions) = turn_permissions_overrides(
+        permission_profile,
+        active_permission_profile,
+        permission_cwd,
+        thread_params_mode,
+    );
+    let cwd = match thread_params_mode {
+        ThreadParamsMode::Embedded => Some(cwd),
+        ThreadParamsMode::Remote => remote_cwd.map(Path::to_path_buf),
+    };
+
+    TurnStartParams {
+        thread_id: thread_id.to_string(),
+        input: items,
+        responsesapi_client_metadata: None,
+        environments: None,
+        cwd,
+        approval_policy: Some(approval_policy),
+        approvals_reviewer: Some(approvals_reviewer.into()),
+        sandbox_policy,
+        permissions,
+        model: Some(model),
+        service_tier,
+        effort,
+        summary,
+        personality,
+        output_schema,
+        collaboration_mode,
+    }
+}
+
 async fn started_thread_from_start_response(
     response: ThreadStartResponse,
     config: &Config,
@@ -1620,6 +1761,7 @@ mod tests {
     async fn thread_lifecycle_response_preserves_raw_cwd_when_paths_need_local_base() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let config = build_config(&temp_dir).await;
+        let thread_id = ThreadId::new();
         let (server_cwd, instruction_source) = if cfg!(windows) {
             ("/home/remote/project", "/home/remote/project/AGENTS.md")
         } else {
@@ -1632,6 +1774,7 @@ mod tests {
             "cwd": server_cwd,
             "instructionSources": [instruction_source],
             "thread": {
+                "id": thread_id.to_string(),
                 "cwd": server_cwd
             }
         });
@@ -1641,16 +1784,146 @@ mod tests {
         );
 
         let raw_cwd = thread_lifecycle_response_cwd(&response);
+        let raw_thread_id = thread_lifecycle_response_thread_id(&response);
         let path_base_guard = AbsolutePathBufGuard::new(config.cwd.as_path());
         let decoded = serde_json::from_value::<TestThreadLifecycleResponse>(response)
             .expect("remote thread response should decode through local path base");
         drop(path_base_guard);
 
         assert_eq!(raw_cwd, Some(PathBuf::from(server_cwd)));
+        assert_eq!(raw_thread_id, Some(thread_id.to_string()));
         assert!(decoded.cwd.as_path().is_absolute());
         assert!(decoded.thread.cwd.as_path().is_absolute());
         assert_eq!(decoded.instruction_sources.len(), 1);
         assert!(decoded.instruction_sources[0].as_path().is_absolute());
+    }
+
+    #[test]
+    fn remote_cwds_are_thread_scoped() {
+        let thread_a = ThreadId::new();
+        let thread_b = ThreadId::new();
+        let mut remote_cwds =
+            RemoteCwds::default().with_explicit_cwd(Some(PathBuf::from("/repo/default")));
+
+        remote_cwds.record_thread_cwd(thread_a, PathBuf::from("/repo/a"));
+        remote_cwds.record_thread_cwd(thread_b, PathBuf::from("/repo/b"));
+
+        assert_eq!(remote_cwds.explicit_cwd(), Some(Path::new("/repo/default")));
+        assert_eq!(
+            remote_cwds.cwd_for_thread(&thread_a),
+            Some(Path::new("/repo/a"))
+        );
+        assert_eq!(
+            remote_cwds.cwd_for_thread(&thread_b),
+            Some(Path::new("/repo/b"))
+        );
+    }
+
+    #[test]
+    fn remote_turn_start_uses_thread_scoped_cwd() {
+        let thread_a = ThreadId::new();
+        let thread_b = ThreadId::new();
+        let mut remote_cwds = RemoteCwds::default();
+        remote_cwds.record_thread_cwd(thread_a, PathBuf::from("/repo/a"));
+        remote_cwds.record_thread_cwd(thread_b, PathBuf::from("/repo/b"));
+
+        let params = turn_start_params(
+            thread_a,
+            Vec::new(),
+            test_path_buf("/local/project").abs().to_path_buf(),
+            &PermissionProfile::read_only(),
+            /*active_permission_profile*/ None,
+            ThreadParamsMode::Remote,
+            remote_cwds.cwd_for_thread(&thread_a),
+            AskForApproval::Never,
+            codex_protocol::config_types::ApprovalsReviewer::User,
+            "gpt-5.4".to_string(),
+            /*effort*/ None,
+            /*summary*/ None,
+            /*service_tier*/ None,
+            /*collaboration_mode*/ None,
+            /*personality*/ None,
+            /*output_schema*/ None,
+        );
+
+        assert_eq!(params.cwd.as_deref(), Some(Path::new("/repo/a")));
+    }
+
+    #[test]
+    fn remote_turn_start_omits_cwd_when_thread_cwd_is_unknown() {
+        let params = turn_start_params(
+            ThreadId::new(),
+            Vec::new(),
+            test_path_buf("/local/project").abs().to_path_buf(),
+            &PermissionProfile::read_only(),
+            /*active_permission_profile*/ None,
+            ThreadParamsMode::Remote,
+            /*remote_cwd*/ None,
+            AskForApproval::Never,
+            codex_protocol::config_types::ApprovalsReviewer::User,
+            "gpt-5.4".to_string(),
+            /*effort*/ None,
+            /*summary*/ None,
+            /*service_tier*/ None,
+            /*collaboration_mode*/ None,
+            /*personality*/ None,
+            /*output_schema*/ None,
+        );
+
+        assert_eq!(params.cwd, None);
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TestSkillsListResponse {
+        data: Vec<TestSkillsListEntry>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TestSkillsListEntry {
+        cwd: AbsolutePathBuf,
+        skills: Vec<TestSkillMetadata>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TestSkillMetadata {
+        path: AbsolutePathBuf,
+    }
+
+    #[test]
+    fn skills_list_response_decodes_with_local_path_base() {
+        let (server_cwd, skill_path) = if cfg!(windows) {
+            (
+                "/home/remote/project",
+                "/home/remote/project/.codex/skills/demo/SKILL.md",
+            )
+        } else {
+            (
+                r"C:\Users\remote\project",
+                r"C:\Users\remote\project\.codex\skills\demo\SKILL.md",
+            )
+        };
+        let response = json!({
+            "data": [{
+                "cwd": server_cwd,
+                "skills": [{
+                    "path": skill_path
+                }]
+            }]
+        });
+        assert!(
+            serde_json::from_value::<TestSkillsListResponse>(response.clone()).is_err(),
+            "remote skills/list paths should not decode without a local base path"
+        );
+
+        let local_base = test_path_buf("/local/project").abs();
+        let path_base_guard = AbsolutePathBufGuard::new(local_base.as_path());
+        let decoded = serde_json::from_value::<TestSkillsListResponse>(response)
+            .expect("skills/list should decode through a local path base");
+        drop(path_base_guard);
+
+        assert!(decoded.data[0].cwd.as_path().is_absolute());
+        assert!(decoded.data[0].skills[0].path.as_path().is_absolute());
     }
 
     #[tokio::test]

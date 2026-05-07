@@ -13,9 +13,12 @@ use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::MarketplaceUpgradeParams;
 use codex_app_server_protocol::MarketplaceUpgradeResponse;
 
+use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::RequestId;
 
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_absolute_path::AbsolutePathBufGuard;
+use serde::de::DeserializeOwned;
 
 impl App {
     pub(super) fn fetch_mcp_inventory(
@@ -81,8 +84,9 @@ impl App {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         let cwd = self.config.cwd.to_path_buf();
+        let is_remote = app_server.is_remote();
         tokio::spawn(async move {
-            let result = fetch_skills_list(request_handle, cwd)
+            let result = fetch_skills_list(request_handle, cwd, is_remote)
                 .await
                 .map_err(|err| format!("{err:#}"));
             app_event_tx.send(AppEvent::SkillsListLoaded { result });
@@ -94,8 +98,9 @@ impl App {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         let cwd = self.config.cwd.to_path_buf();
+        let is_remote = app_server.is_remote();
         tokio::spawn(async move {
-            let result = fetch_hooks_list(request_handle, cwd.clone()).await;
+            let result = fetch_hooks_list(request_handle, cwd.clone(), is_remote).await;
             let response = match result {
                 Ok(response) => response,
                 Err(err) => {
@@ -133,8 +138,9 @@ impl App {
     pub(super) fn fetch_plugins_list(&mut self, app_server: &AppServerSession, cwd: PathBuf) {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
+        let is_remote = app_server.is_remote();
         tokio::spawn(async move {
-            let result = fetch_plugins_list(request_handle, cwd.clone())
+            let result = fetch_plugins_list(request_handle, cwd.clone(), is_remote)
                 .await
                 .map_err(|err| err.to_string());
             app_event_tx.send(AppEvent::PluginsLoaded { cwd, result });
@@ -144,8 +150,9 @@ impl App {
     pub(super) fn fetch_hooks_list(&mut self, app_server: &AppServerSession, cwd: PathBuf) {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
+        let is_remote = app_server.is_remote();
         tokio::spawn(async move {
-            let result = fetch_hooks_list(request_handle, cwd.clone())
+            let result = fetch_hooks_list(request_handle, cwd.clone(), is_remote)
                 .await
                 .map_err(|err| err.to_string());
             app_event_tx.send(AppEvent::HooksLoaded { cwd, result });
@@ -635,42 +642,92 @@ pub(super) async fn send_add_credits_nudge_email(
     Ok(response.status)
 }
 
+async fn request_typed_with_local_path_base<T>(
+    request_handle: &AppServerRequestHandle,
+    is_remote: bool,
+    method: &'static str,
+    request: ClientRequest,
+    local_path_base: &std::path::Path,
+) -> std::result::Result<T, TypedRequestError>
+where
+    T: DeserializeOwned,
+{
+    if !is_remote {
+        return request_handle.request_typed(request).await;
+    }
+
+    let response =
+        request_handle
+            .request(request)
+            .await
+            .map_err(|source| TypedRequestError::Transport {
+                method: method.to_string(),
+                source,
+            })?;
+    let result = response.map_err(|source| TypedRequestError::Server {
+        method: method.to_string(),
+        source,
+    })?;
+    let path_base_guard = AbsolutePathBufGuard::new(local_path_base);
+    let response =
+        serde_json::from_value(result).map_err(|source| TypedRequestError::Deserialize {
+            method: method.to_string(),
+            source,
+        })?;
+    drop(path_base_guard);
+    Ok(response)
+}
+
 pub(super) async fn fetch_skills_list(
     request_handle: AppServerRequestHandle,
     cwd: PathBuf,
+    is_remote: bool,
 ) -> Result<SkillsListResponse> {
+    let local_path_base = cwd.clone();
     let request_id = RequestId::String(format!("startup-skills-list-{}", Uuid::new_v4()));
     // Use the cloneable request handle so startup can issue this RPC from a background task without
     // extending a borrow of `AppServerSession` across the first frame render.
-    request_handle
-        .request_typed(ClientRequest::SkillsList {
+    request_typed_with_local_path_base(
+        &request_handle,
+        is_remote,
+        "skills/list",
+        ClientRequest::SkillsList {
             request_id,
             params: SkillsListParams {
                 cwds: vec![cwd],
                 force_reload: true,
                 per_cwd_extra_user_roots: None,
             },
-        })
-        .await
-        .wrap_err("skills/list failed in TUI")
+        },
+        local_path_base.as_path(),
+    )
+    .await
+    .wrap_err("skills/list failed in TUI")
 }
 
 pub(super) async fn fetch_plugins_list(
     request_handle: AppServerRequestHandle,
     cwd: PathBuf,
+    is_remote: bool,
 ) -> Result<PluginListResponse> {
+    let local_path_base = cwd.clone();
     let cwd = AbsolutePathBuf::try_from(cwd).wrap_err("plugin list cwd must be absolute")?;
     let request_id = RequestId::String(format!("plugin-list-{}", Uuid::new_v4()));
-    let mut response = request_handle
-        .request_typed(ClientRequest::PluginList {
+    let mut response = request_typed_with_local_path_base(
+        &request_handle,
+        is_remote,
+        "plugin/list",
+        ClientRequest::PluginList {
             request_id,
             params: PluginListParams {
                 cwds: Some(vec![cwd]),
                 marketplace_kinds: None,
             },
-        })
-        .await
-        .wrap_err("plugin/list failed in TUI")?;
+        },
+        local_path_base.as_path(),
+    )
+    .await
+    .wrap_err("plugin/list failed in TUI")?;
     hide_cli_only_plugin_marketplaces(&mut response);
     Ok(response)
 }
@@ -678,15 +735,22 @@ pub(super) async fn fetch_plugins_list(
 pub(super) async fn fetch_hooks_list(
     request_handle: AppServerRequestHandle,
     cwd: PathBuf,
+    is_remote: bool,
 ) -> Result<HooksListResponse> {
+    let local_path_base = cwd.clone();
     let request_id = RequestId::String(format!("hooks-list-{}", Uuid::new_v4()));
-    request_handle
-        .request_typed(ClientRequest::HooksList {
+    request_typed_with_local_path_base(
+        &request_handle,
+        is_remote,
+        "hooks/list",
+        ClientRequest::HooksList {
             request_id,
             params: HooksListParams { cwds: vec![cwd] },
-        })
-        .await
-        .wrap_err("hooks/list failed in TUI")
+        },
+        local_path_base.as_path(),
+    )
+    .await
+    .wrap_err("hooks/list failed in TUI")
 }
 
 const CLI_HIDDEN_PLUGIN_MARKETPLACES: &[&str] = &["openai-bundled"];
