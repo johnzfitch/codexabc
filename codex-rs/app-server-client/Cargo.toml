@@ -22,9 +22,10 @@ codex-feedback = { workspace = true }
 codex-protocol = { workspace = true }
 codex-utils-rustls-provider = { workspace = true }
 futures = { workspace = true }
+russh-sftp = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time", "rt"] }
+tokio = { workspace = true, features = ["io-util", "sync", "time", "rt"] }
 tokio-tungstenite = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }

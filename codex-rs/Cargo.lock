@@ -1936,6 +1936,7 @@ dependencies = [
  "codex-utils-rustls-provider",
  "futures",
  "pretty_assertions",
+ "russh-sftp",
  "serde",
  "serde_json",
  "tempfile",
