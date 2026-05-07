@@ -1,6 +1,7 @@
 use crate::metrics::Result;
 use crate::metrics::validation::validate_tag_key;
 use crate::metrics::validation::validate_tag_value;
+use codex_utils_string::sanitize_metric_tag_value;
 
 pub const APP_VERSION_TAG: &str = "app.version";
 pub const AUTH_MODE_TAG: &str = "auth_mode";
@@ -8,6 +9,24 @@ pub const MODEL_TAG: &str = "model";
 pub const ORIGINATOR_TAG: &str = "originator";
 pub const SERVICE_NAME_TAG: &str = "service_name";
 pub const SESSION_SOURCE_TAG: &str = "session_source";
+
+const OTHER_ORIGINATOR_TAG_VALUE: &str = "other";
+
+/// Returns a sanitized, low-cardinality originator value that is safe to use as a metric tag.
+pub fn bounded_originator_tag_value(originator: &str) -> &'static str {
+    match sanitize_metric_tag_value(originator).as_str() {
+        "codex_desktop" => "codex_desktop",
+        "codex_cli_rs" => "codex_cli_rs",
+        "codex-tui" => "codex-tui",
+        "codex_vscode" => "codex_vscode",
+        "none" => "none",
+        "codex_exec" => "codex_exec",
+        "codex-cli" => "codex-cli",
+        "codex_sdk_ts" => "codex_sdk_ts",
+        "codex-app-server-sdk" => "codex-app-server-sdk",
+        _ => OTHER_ORIGINATOR_TAG_VALUE,
+    }
+}
 
 pub struct SessionMetricTagValues<'a> {
     pub auth_mode: Option<&'a str>,
@@ -54,7 +73,59 @@ mod tests {
     use super::SERVICE_NAME_TAG;
     use super::SESSION_SOURCE_TAG;
     use super::SessionMetricTagValues;
+    use super::bounded_originator_tag_value;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn bounded_originator_tag_value_passes_expected_values() {
+        let originators = [
+            "codex_desktop",
+            "codex_cli_rs",
+            "codex-tui",
+            "codex_vscode",
+            "none",
+            "codex_exec",
+            "codex-cli",
+            "codex_sdk_ts",
+            "codex-app-server-sdk",
+        ];
+
+        let mapped = originators
+            .into_iter()
+            .map(|originator| (originator, bounded_originator_tag_value(originator)))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            mapped,
+            vec![
+                ("codex_desktop", "codex_desktop"),
+                ("codex_cli_rs", "codex_cli_rs"),
+                ("codex-tui", "codex-tui"),
+                ("codex_vscode", "codex_vscode"),
+                ("none", "none"),
+                ("codex_exec", "codex_exec"),
+                ("codex-cli", "codex-cli"),
+                ("codex_sdk_ts", "codex_sdk_ts"),
+                ("codex-app-server-sdk", "codex-app-server-sdk"),
+            ]
+        );
+    }
+
+    #[test]
+    fn bounded_originator_tag_value_maps_omitted_and_unknown_values_to_other() {
+        let mapped = [
+            "pi",
+            "opencode",
+            "random-client",
+            "Codex Desktop",
+            "bad value!",
+        ]
+        .into_iter()
+        .map(bounded_originator_tag_value)
+        .collect::<Vec<_>>();
+
+        assert_eq!(mapped, vec!["other", "other", "other", "other", "other"]);
+    }
 
     #[test]
     fn session_metric_tags_include_expected_tags_in_order() {

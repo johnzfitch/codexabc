@@ -15,7 +15,9 @@ pub use crate::metrics::error::MetricsError;
 pub use crate::metrics::error::Result;
 pub use names::*;
 use std::sync::OnceLock;
+pub use tags::ORIGINATOR_TAG;
 pub use tags::SessionMetricTagValues;
+pub use tags::bounded_originator_tag_value;
 
 static GLOBAL_METRICS: OnceLock<MetricsClient> = OnceLock::new();
 static GLOBAL_STATSIG_METRICS_SETTINGS: OnceLock<StatsigMetricsSettings> = OnceLock::new();
