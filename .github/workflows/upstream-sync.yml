@@ -1,0 +1,207 @@
+# Keeps this fork in sync with its upstream repository, including tags.
+#
+# Each run fast-forwards SYNC_BRANCH to upstream when this fork has no commits
+# of its own, merges upstream in when it does, and pushes every upstream tag
+# this fork is missing. Run it manually (with `dry_run`) to preview.
+#
+# Operational notes:
+#   - Actions must be enabled on the fork, and this file must live on the
+#     default branch or the `schedule` trigger never fires.
+#   - GitHub disables scheduled workflows in repos with no activity for 60
+#     days; the run has to be re-enabled from the Actions tab after that.
+#   - Pushes made with GITHUB_TOKEN do not trigger other workflows, so syncing
+#     does not kick off a full CI run on every upstream commit.
+#   - If SYNC_BRANCH is protected, GITHUB_TOKEN cannot push to it. Either
+#     exempt this workflow or swap in a PAT with `contents: write`.
+---
+name: Upstream Sync
+
+on:
+  schedule:
+    # Hourly. The offset keeps this off the top-of-hour rush, where GitHub
+    # delays or drops scheduled runs under load.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: >-
+          Hard-reset the branch to upstream instead of merging.
+          Discards any commit this fork has that upstream does not.
+        type: boolean
+        default: false
+      dry_run:
+        description: "Report what would change without pushing."
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: openai/codex
+  # Branch synced from upstream into the same branch name on this fork.
+  SYNC_BRANCH: main
+
+jobs:
+  sync:
+    name: Sync branch and tags from upstream
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.SYNC_BRANCH }}
+          fetch-depth: 0
+          # Credentials are required here: this job pushes back to the fork.
+          persist-credentials: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          # Upstream tags land in their own namespace rather than refs/tags/*,
+          # so the sync step can still tell which tags this fork is missing.
+          git fetch --prune --force upstream \
+            "+refs/heads/${SYNC_BRANCH}:refs/remotes/upstream/${SYNC_BRANCH}" \
+            "+refs/tags/*:refs/upstream-tags/*"
+
+      - name: Sync branch
+        id: branch
+        env:
+          FORCE: ${{ inputs.force || false }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+        run: |
+          set -euo pipefail
+
+          local_sha=$(git rev-parse "origin/${SYNC_BRANCH}")
+          upstream_sha=$(git rev-parse "upstream/${SYNC_BRANCH}")
+
+          if [ "$local_sha" = "$upstream_sha" ]; then
+            echo "${SYNC_BRANCH} already matches upstream ($upstream_sha)."
+            echo "result=up-to-date" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          behind=$(git rev-list --count "${local_sha}..${upstream_sha}")
+          ahead=$(git rev-list --count "${upstream_sha}..${local_sha}")
+          echo "${SYNC_BRANCH} is ${behind} commit(s) behind, ${ahead} ahead of upstream."
+
+          if [ "$FORCE" = "true" ]; then
+            # Explicitly requested: throw away anything not in upstream.
+            if [ "$ahead" -ne 0 ]; then
+              echo "::warning::Force-resetting ${SYNC_BRANCH} to upstream," \
+                "discarding ${ahead} commit(s)."
+            fi
+            new_sha=$upstream_sha
+            mode=reset
+          elif [ "$ahead" -eq 0 ]; then
+            # The common case: nothing local to preserve, so no merge commit.
+            new_sha=$upstream_sha
+            mode=fast-forward
+          else
+            # This fork carries commits of its own (this workflow, at minimum),
+            # so merge upstream in rather than dropping them.
+            git config user.name "github-actions[bot]"
+            git config user.email \
+              "41898282+github-actions[bot]@users.noreply.github.com"
+            git checkout -B "$SYNC_BRANCH" "origin/${SYNC_BRANCH}"
+            if ! git merge --no-edit \
+              -m "Merge upstream ${UPSTREAM_REPO}@${upstream_sha:0:12}" \
+              "upstream/${SYNC_BRANCH}"; then
+              conflicts=$(git diff --name-only --diff-filter=U | sed 's/^/  /')
+              git merge --abort
+              echo "::error::Merging upstream into ${SYNC_BRANCH} hit conflicts:"
+              echo "$conflicts"
+              echo "::error::Resolve them locally and push, or re-run this" \
+                "workflow with 'force' to reset ${SYNC_BRANCH} to upstream."
+              exit 1
+            fi
+            new_sha=$(git rev-parse HEAD)
+            mode=merge
+          fi
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run: would ${mode} ${SYNC_BRANCH} to ${new_sha}."
+            echo "result=dry-run (${mode})" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # --force-with-lease keeps a concurrent push from being clobbered.
+          git push \
+            --force-with-lease="refs/heads/${SYNC_BRANCH}:${local_sha}" \
+            origin "${new_sha}:refs/heads/${SYNC_BRANCH}"
+          echo "Pushed ${new_sha} to ${SYNC_BRANCH} (${mode})."
+          echo "result=${mode}" >>"$GITHUB_OUTPUT"
+
+      - name: Sync tags
+        id: tags
+        env:
+          DRY_RUN: ${{ inputs.dry_run || false }}
+        run: |
+          set -euo pipefail
+
+          # Tag names this fork already has, and where they point.
+          declare -A fork_tags=()
+          while read -r sha ref; do
+            [ "${ref%^{\}}" = "$ref" ] || continue  # skip peeled entries
+            fork_tags["${ref#refs/tags/}"]=$sha
+          done < <(git ls-remote --tags origin)
+
+          # Upstream is the source of truth for the tag names it owns; tags
+          # that exist only on the fork are left alone.
+          refspecs=()
+          while read -r sha tag; do
+            if [ "${fork_tags[$tag]-}" != "$sha" ]; then
+              refspecs+=("+refs/upstream-tags/${tag}:refs/tags/${tag}")
+            fi
+          done < <(
+            git for-each-ref --format='%(objectname) %(refname:lstrip=2)' \
+              refs/upstream-tags/
+          )
+
+          if [ "${#refspecs[@]}" -eq 0 ]; then
+            echo "All upstream tags are already present on this fork."
+            echo "count=0" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "${#refspecs[@]} tag(s) to sync:"
+          printf '  %s\n' "${refspecs[@]##*:refs/tags/}"
+          echo "count=${#refspecs[@]}" >>"$GITHUB_OUTPUT"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run: no tags pushed."
+            exit 0
+          fi
+
+          # Push in batches so a first-time backfill of many tags does not
+          # exceed the remote's per-push ref limit.
+          batch=()
+          flush() {
+            if [ "${#batch[@]}" -gt 0 ]; then
+              git push origin "${batch[@]}"
+              batch=()
+            fi
+          }
+          for refspec in "${refspecs[@]}"; do
+            batch+=("$refspec")
+            if [ "${#batch[@]}" -ge 100 ]; then flush; fi
+          done
+          flush
+
+      - name: Summary
+        if: always() && !cancelled()
+        run: |
+          {
+            echo "### Upstream sync"
+            echo
+            echo "- Upstream: \`${UPSTREAM_REPO}\`"
+            echo "- Branch \`${SYNC_BRANCH}\`: ${{ steps.branch.outputs.result || 'failed' }}"
+            echo "- Tags synced: ${{ steps.tags.outputs.count || 'n/a' }}"
+          } >>"$GITHUB_STEP_SUMMARY"
