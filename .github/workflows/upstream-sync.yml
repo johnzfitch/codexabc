@@ -55,7 +55,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ env.SYNC_BRANCH }}
           fetch-depth: 0
           # Credentials are required here: this job pushes back to the fork.
           persist-credentials: true
