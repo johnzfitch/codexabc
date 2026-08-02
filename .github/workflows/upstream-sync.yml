@@ -59,7 +59,14 @@ jobs:
           fetch-depth: 0
           # Credentials are required here: this job pushes back to the fork.
           persist-credentials: true
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # GITHUB_TOKEN cannot push a tag whose commit carries different
+          # .github/workflows/ content than the default branch — GitHub
+          # refuses it as an unauthorized workflow update, and there is no
+          # `workflows` key settable under `permissions`. Nearly every
+          # upstream release tag trips this, so tag sync needs a PAT with
+          # the `workflow` scope in UPSTREAM_SYNC_TOKEN. Branch sync works
+          # on GITHUB_TOKEN alone.
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Fetch upstream
         run: |
@@ -187,18 +194,36 @@ jobs:
           # time out ("Timed out validating rule, please try again") — which
           # rejects the whole push. 20 refs at a time stays under that.
           push_batch() {
-            local attempt
+            local attempt output
             for attempt in 1 2 3; do
-              if git push origin "$@"; then
+              if output=$(git push origin "$@" 2>&1); then
                 return 0
               fi
+              printf '%s\n' "$output"
+              LAST_PUSH_OUTPUT=$output
+              # Only ruleset/workflow validation timeouts are worth retrying.
+              # A refusal is a settled answer, and retrying 237 tags through
+              # it burns half an hour to reach the same place.
+              if ! grep -qi 'timed out\|timeout' <<<"$output"; then
+                return 1
+              fi
               if [ "$attempt" -lt 3 ]; then
-                echo "::warning::Tag push attempt ${attempt} of 3 failed;" \
+                echo "::warning::Tag push attempt ${attempt} of 3 timed out;" \
                   "retrying in $((attempt * 10))s."
                 sleep $((attempt * 10))
               fi
             done
             return 1
+          }
+
+          # Surface the actual blocker once, rather than 12 times.
+          note_rejection() {
+            if grep -qi 'without .workflows. permission' <<<"$1"; then
+              echo "::error::Tag pushes are being refused because" \
+                "GITHUB_TOKEN may not update .github/workflows/ content." \
+                "Add a PAT with the 'workflow' scope as the repository" \
+                "secret UPSTREAM_SYNC_TOKEN; branch sync is unaffected."
+            fi
           }
 
           batch=()
@@ -209,8 +234,12 @@ jobs:
             # A batch that keeps failing must not abandon the batches behind
             # it: every tag that does land is one the next run skips.
             if ! push_batch "${batch[@]}"; then
-              echo "::warning::A batch of ${#batch[@]} tag(s) was rejected" \
-                "after 3 attempts; continuing with the rest."
+              echo "::warning::A batch of ${#batch[@]} tag(s) was rejected;" \
+                "continuing with the rest."
+              if [ -z "${rejection_noted-}" ]; then
+                note_rejection "$LAST_PUSH_OUTPUT"
+                rejection_noted=1
+              fi
             fi
             batch=()
           }
