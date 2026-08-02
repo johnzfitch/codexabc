@@ -180,20 +180,52 @@ jobs:
             exit 0
           fi
 
-          # Push in batches so a first-time backfill of many tags does not
-          # exceed the remote's per-push ref limit.
+          # Push in small batches. GitHub validates every pushed ref against
+          # the repository's rulesets, and a large batch makes that validator
+          # time out ("Timed out validating rule, please try again") — which
+          # rejects the whole push. 20 refs at a time stays under that.
+          push_batch() {
+            local attempt
+            for attempt in 1 2 3; do
+              if git push origin "$@"; then
+                return 0
+              fi
+              echo "::warning::Tag push attempt ${attempt} of 3 failed;" \
+                "retrying in $((attempt * 10))s."
+              sleep $((attempt * 10))
+            done
+            return 1
+          }
+
+          unpushed=0
           batch=()
           flush() {
-            if [ "${#batch[@]}" -gt 0 ]; then
-              git push origin "${batch[@]}"
-              batch=()
+            if [ "${#batch[@]}" -eq 0 ]; then
+              return
             fi
+            # A batch that keeps failing must not abandon the batches behind
+            # it: every tag that does land is one the next run skips.
+            if ! push_batch "${batch[@]}"; then
+              unpushed=$((unpushed + ${#batch[@]}))
+              echo "::warning::${#batch[@]} tag(s) still rejected after 3" \
+                "attempts; continuing with the rest."
+            fi
+            batch=()
           }
           for refspec in "${refspecs[@]}"; do
             batch+=("$refspec")
-            if [ "${#batch[@]}" -ge 100 ]; then flush; fi
+            if [ "${#batch[@]}" -ge 20 ]; then flush; fi
           done
           flush
+
+          pushed=$(( ${#refspecs[@]} - unpushed ))
+          echo "pushed=${pushed}" >>"$GITHUB_OUTPUT"
+          echo "Pushed ${pushed} of ${#refspecs[@]} tag(s)."
+          if [ "$unpushed" -ne 0 ]; then
+            echo "::error::${unpushed} tag(s) could not be pushed. The next" \
+              "run retries only those; tags already pushed are not repeated."
+            exit 1
+          fi
 
       - name: Summary
         if: always() && !cancelled()
@@ -203,5 +235,6 @@ jobs:
             echo
             echo "- Upstream: \`${UPSTREAM_REPO}\`"
             echo "- Branch \`${SYNC_BRANCH}\`: ${{ steps.branch.outputs.result || 'failed' }}"
-            echo "- Tags synced: ${{ steps.tags.outputs.count || 'n/a' }}"
+            echo "- Tags to sync: ${{ steps.tags.outputs.count || 'n/a' }}"
+            echo "- Tags pushed: ${{ steps.tags.outputs.pushed || 'n/a' }}"
           } >>"$GITHUB_STEP_SUMMARY"
