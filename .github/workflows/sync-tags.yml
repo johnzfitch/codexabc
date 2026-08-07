@@ -17,8 +17,8 @@ on:
     inputs:
       limit:
         description: "Max tags to sync (0 = all). Use a small number to test."
-        type: string
-        default: "0"
+        type: number
+        default: 0
       dry_run:
         description: "List what would be synced without creating anything."
         type: boolean
@@ -74,9 +74,16 @@ jobs:
             exit 0
           fi
 
-          if [ "${LIMIT:-0}" -gt 0 ] && [ "${#missing[@]}" -gt "$LIMIT" ]; then
-            echo "Limiting to ${LIMIT} of ${#missing[@]} missing tag(s)."
-            missing=("${missing[@]:0:$LIMIT}")
+          # Anything that is not a plain count means "no limit", so a typo
+          # cannot silently turn a 5-tag trial into all of them.
+          case "${LIMIT:-0}" in
+            "" | *[!0-9]*) limit=0 ;;
+            *) limit=$LIMIT ;;
+          esac
+
+          if [ "$limit" -gt 0 ] && [ "${#missing[@]}" -gt "$limit" ]; then
+            echo "Limiting to ${limit} of ${#missing[@]} missing tag(s)."
+            missing=("${missing[@]:0:$limit}")
           fi
 
           echo "${#missing[@]} tag(s) to sync."
@@ -94,24 +101,25 @@ jobs:
             tag=${entry%%|*}
             sha=${entry##*|}
 
-            if err=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-              -f ref="refs/tags/${tag}" -f sha="${sha}" 2>&1 >/dev/null); then
-              ok=$((ok + 1))
-              continue
-            fi
-
-            # Already there but pointing elsewhere: move it.
-            if grep -q 'already exists' <<<"$err"; then
-              if err=$(gh api -X PATCH \
+            # We already know from the diff whether the tag exists here, so
+            # pick the verb up front rather than parsing an error string for
+            # it. `2>&1 >/dev/null` keeps stderr and drops stdout — the order
+            # matters, the reverse would capture nothing.
+            if [ -n "${have[$tag]-}" ]; then
+              err=$(gh api -X PATCH \
                 "repos/${GITHUB_REPOSITORY}/git/refs/tags/${tag}" \
-                -F sha="${sha}" -F force=true 2>&1 >/dev/null); then
-                ok=$((ok + 1))
-                continue
-              fi
+                -F sha="${sha}" -F force=true 2>&1 >/dev/null) && ok=$((ok + 1)) \
+                && continue
+            else
+              err=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+                -f ref="refs/tags/${tag}" -f sha="${sha}" 2>&1 >/dev/null) \
+                && ok=$((ok + 1)) && continue
             fi
 
             failed=$((failed + 1))
-            [ -n "$first_error" ] || first_error="${tag}: ${err}"
+            # Flatten: a multi-line body inside ::error:: mangles the log.
+            [ -n "$first_error" ] ||
+              first_error="${tag}: $(tr '\n' ' ' <<<"$err" | cut -c1-400)"
           done
 
           echo "Created or updated ${ok} tag(s); ${failed} failed."
