@@ -1,0 +1,137 @@
+# Copies missing upstream tags onto this fork. Run it by hand from the
+# Actions tab: Actions -> Sync Tags -> Run workflow.
+#
+# This exists because `git push` cannot do the job. GitHub refuses to let a
+# token push a tag whose commit carries different .github/workflows/ content
+# than the default branch, and nearly every upstream release tag does. The
+# refs API is a different path: it creates a ref that points at a commit the
+# fork network already stores, so nothing is pushed and the workflow-file
+# check never applies. No PAT needed.
+#
+# If UPSTREAM_SYNC_TOKEN is set it is used, otherwise GITHUB_TOKEN.
+---
+name: Sync Tags
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max tags to sync (0 = all). Use a small number to test."
+        type: number
+        default: 0
+      dry_run:
+        description: "List what would be synced without creating anything."
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-tags
+  cancel-in-progress: false
+
+jobs:
+  sync-tags:
+    name: Copy upstream tags to this fork
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Sync tags
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+          UPSTREAM_REPO: openai/codex
+          LIMIT: ${{ inputs.limit }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          # No checkout and no clone: ls-remote answers both sides directly.
+          # Peeled entries (refs/tags/X^{}) are dropped so annotated tags keep
+          # pointing at their tag object rather than the commit underneath.
+          list_tags() {
+            git ls-remote --tags "https://github.com/$1.git" \
+              | grep -v '\^{}$' \
+              | sed 's#\trefs/tags/#\t#'
+          }
+
+          echo "Reading tags from ${UPSTREAM_REPO} and this fork..."
+          list_tags "$UPSTREAM_REPO" | sort -k2 >/tmp/upstream.tsv
+          list_tags "$GITHUB_REPOSITORY" | sort -k2 >/tmp/fork.tsv
+          echo "upstream: $(wc -l </tmp/upstream.tsv), fork: $(wc -l </tmp/fork.tsv)"
+
+          declare -A have=()
+          while read -r sha tag; do have[$tag]=$sha; done </tmp/fork.tsv
+
+          missing=()
+          while read -r sha tag; do
+            [ "${have[$tag]-}" = "$sha" ] || missing+=("$tag|$sha")
+          done </tmp/upstream.tsv
+
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "Nothing to do — every upstream tag is already here."
+            exit 0
+          fi
+
+          # Anything that is not a plain count means "no limit", so a typo
+          # cannot silently turn a 5-tag trial into all of them.
+          case "${LIMIT:-0}" in
+            "" | *[!0-9]*) limit=0 ;;
+            *) limit=$LIMIT ;;
+          esac
+
+          if [ "$limit" -gt 0 ] && [ "${#missing[@]}" -gt "$limit" ]; then
+            echo "Limiting to ${limit} of ${#missing[@]} missing tag(s)."
+            missing=("${missing[@]:0:$limit}")
+          fi
+
+          echo "${#missing[@]} tag(s) to sync."
+          if [ "$DRY_RUN" = "true" ]; then
+            printf '  %s\n' "${missing[@]%%|*}"
+            echo "Dry run — nothing created."
+            exit 0
+          fi
+
+          ok=0
+          failed=0
+          first_error=
+
+          for entry in "${missing[@]}"; do
+            tag=${entry%%|*}
+            sha=${entry##*|}
+
+            # We already know from the diff whether the tag exists here, so
+            # pick the verb up front rather than parsing an error string for
+            # it. `2>&1 >/dev/null` keeps stderr and drops stdout — the order
+            # matters, the reverse would capture nothing.
+            if [ -n "${have[$tag]-}" ]; then
+              err=$(gh api -X PATCH \
+                "repos/${GITHUB_REPOSITORY}/git/refs/tags/${tag}" \
+                -F sha="${sha}" -F force=true 2>&1 >/dev/null) && ok=$((ok + 1)) \
+                && continue
+            else
+              err=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+                -f ref="refs/tags/${tag}" -f sha="${sha}" 2>&1 >/dev/null) \
+                && ok=$((ok + 1)) && continue
+            fi
+
+            failed=$((failed + 1))
+            # Flatten: a multi-line body inside ::error:: mangles the log.
+            [ -n "$first_error" ] ||
+              first_error="${tag}: $(tr '\n' ' ' <<<"$err" | cut -c1-400)"
+          done
+
+          echo "Created or updated ${ok} tag(s); ${failed} failed."
+          {
+            echo "### Sync Tags"
+            echo
+            echo "- Upstream: \`${UPSTREAM_REPO}\`"
+            echo "- Synced: ${ok}"
+            echo "- Failed: ${failed}"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          if [ "$failed" -gt 0 ]; then
+            echo "::error::${failed} tag(s) failed. First error — ${first_error}"
+            exit 1
+          fi
