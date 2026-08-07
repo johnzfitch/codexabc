@@ -85,7 +85,8 @@
 //! Parent-owned subagent threads keep the draft editable while blocking agent-directed submission.
 //! On the `Enter` and `Tab` submission paths, normal prompts, disallowed slash commands, and `!`
 //! shell commands return `ParentOwnedInputBlocked` without clearing the draft. Bare local and
-//! navigation slash commands remain available so users can leave or manage the view.
+//! navigation slash commands remain available so users can leave or manage the view. Transcript
+//! exports also remain available, including an explicit destination filename.
 //!
 //! # Reasoning Effort Animations
 //!
@@ -357,6 +358,10 @@ pub enum InputResult {
 }
 
 fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
+    if command == SlashCommand::Export {
+        return true;
+    }
+
     args.is_empty()
         && matches!(
             command,
@@ -6721,6 +6726,7 @@ mod tests {
         composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
             config_name: "sample@test".to_string(),
             display_name: "Sample Plugin".to_string(),
+            plugin_namespace: None,
             description: None,
             has_skills: true,
             mcp_server_names: vec!["sample".to_string()],
@@ -6773,6 +6779,7 @@ mod tests {
         PluginCapabilitySummary {
             config_name: format!("{name}@test"),
             display_name: name.to_string(),
+            plugin_namespace: None,
             description: Some(description.to_string()),
             has_skills: false,
             mcp_server_names: vec![name.to_string()],
@@ -7445,6 +7452,7 @@ mod tests {
         composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
             config_name: "google-calendar@debug".to_string(),
             display_name: "Google Calendar".to_string(),
+            plugin_namespace: None,
             description: Some(
                 "Connect Google Calendar for scheduling, availability, and event management."
                     .to_string(),
@@ -7497,6 +7505,7 @@ mod tests {
                 composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
                     config_name: "sample@test".to_string(),
                     display_name: "Sample Plugin".to_string(),
+                    plugin_namespace: None,
                     description: Some(
                         "Plugin that includes the Figma MCP server and Skills for common workflows"
                             .to_string(),
@@ -7522,6 +7531,7 @@ mod tests {
                 composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
                     config_name: "sample@test".to_string(),
                     display_name: "Sample Plugin".to_string(),
+                    plugin_namespace: None,
                     description: Some("Plugin with skills and an MCP server".to_string()),
                     has_skills: true,
                     mcp_server_names: vec!["sample".to_string()],
@@ -7629,6 +7639,7 @@ mod tests {
                 composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
                 config_name: "google-calendar@debug".to_string(),
                 display_name: "Google Calendar".to_string(),
+                plugin_namespace: None,
                 description: Some(
                     "Connect Google Calendar for scheduling, availability, and event management."
                         .to_string(),
@@ -8197,6 +8208,7 @@ mod tests {
             composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
                 config_name: "sample@test".to_string(),
                 display_name: "sample".to_string(),
+                plugin_namespace: None,
                 description: None,
                 has_skills: true,
                 mcp_server_names: vec!["sample".to_string()],

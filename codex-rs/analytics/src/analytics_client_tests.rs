@@ -4786,6 +4786,7 @@ async fn turn_event_counts_completed_tool_items() {
             status: "completed".to_string(),
             revised_prompt: None,
             result: "ok".to_string(),
+            transparent_background: None,
             saved_path: None,
         }),
     ];
@@ -5379,6 +5380,7 @@ fn sample_plugin_metadata() -> PluginTelemetryMetadata {
         capability_summary: Some(PluginCapabilitySummary {
             config_name: "sample@test".to_string(),
             display_name: "sample".to_string(),
+            plugin_namespace: None,
             description: None,
             has_skills: true,
             mcp_server_names: vec!["mcp-1".to_string(), "mcp-2".to_string()],

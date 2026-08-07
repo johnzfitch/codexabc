@@ -13,6 +13,7 @@ use codex_config::ConfigRequirements;
 use codex_config::ConfigRequirementsToml;
 use codex_config::ConstrainedWithSource;
 use codex_config::FeatureRequirementsToml;
+use codex_config::ManagedAuthPolicy;
 use codex_config::McpServerRequirement;
 use codex_config::PluginRequirementsToml;
 use codex_config::ProfileV2Name;
@@ -69,7 +70,6 @@ use codex_features::FeaturesToml;
 use codex_features::MultiAgentV2ConfigToml;
 use codex_features::NetworkProxyConfigToml;
 use codex_features::TokenBudgetConfigToml;
-use codex_features::TokenBudgetMode;
 use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
@@ -104,6 +104,7 @@ use codex_protocol::config_types::WebSearchConfig;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::ActivePermissionProfile;
+use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::openai_models::ModelsResponse;
@@ -160,6 +161,7 @@ mod requirements;
 mod resolved_permission_profile;
 #[cfg(test)]
 mod schema;
+pub use auth_keyring::bootstrap_auth_config;
 pub use auth_keyring::resolve_bootstrap_auth_keyring_backend_kind;
 pub use codex_config::ConfigLoadOptions;
 pub use codex_config::Constrained;
@@ -253,6 +255,8 @@ You may also see them addressed as to=/root/..., which indicates your identity i
 "#;
 const DEFAULT_MULTI_AGENT_V2_MODEL_OVERRIDE_USAGE_HINT_TEXT: &str = "Full-history forks (`fork_turns` omitted or `\"all\"`) inherit the parent model and reasoning effort and do not accept overrides. Only set `model` or `reasoning_effort` when explicitly requested by the user, applicable `AGENTS.md` instructions, or skill instructions; when doing so, set `fork_turns` to `\"none\"` or a positive integer string.";
 const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "collaboration";
+const DEFAULT_MULTI_AGENT_V2_WAIT_AGENT_USAGE_HINT_TEXT: &str =
+    "When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.";
 const DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT: &str = r#"Note that collaboration tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents` only as direct tool calls using the recipient shown in their tool definitions, such as `to=functions.collaboration.spawn_agent`, since they are intentionally absent from the `functions.exec` `tools.*` namespace. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.
 
 All agents share the same directory. In detail:
@@ -260,9 +264,17 @@ All agents share the same directory. In detail:
 - All agents use the same current working directory.
 - As a result, edits made by one agent are immediately visible to all other agents.
 "#;
-fn default_multi_agent_v2_usage_hint_text(usage_hint_text: &str, max_concurrency: usize) -> String {
+fn default_multi_agent_v2_usage_hint_text(
+    usage_hint_text: &str,
+    max_concurrency: usize,
+    wait_agent_usage_hint_text: Option<&str>,
+) -> String {
+    let wait_agent_usage_hint_text = match wait_agent_usage_hint_text {
+        Some(wait_agent_usage_hint_text) => format!("{wait_agent_usage_hint_text}\n\n"),
+        None => String::new(),
+    };
     format!(
-        "{usage_hint_text}\n{DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT}\nThere are {max_concurrency} available concurrency slots, meaning that up to {max_concurrency} agents can be active at once, including you."
+        "{usage_hint_text}\n{DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT}\n{wait_agent_usage_hint_text}There are {max_concurrency} available concurrency slots, meaning that up to {max_concurrency} agents can be active at once, including you."
     )
 }
 
@@ -678,6 +690,9 @@ pub struct Config {
     /// Base instructions override.
     pub base_instructions: Option<String>,
 
+    /// Origin of the configured base instructions when supplied by another session or lockfile.
+    pub base_instructions_provenance: Option<BaseInstructionsProvenance>,
+
     /// Developer instructions override injected as a separate message.
     pub developer_instructions: Option<String>,
 
@@ -853,7 +868,7 @@ pub struct Config {
     /// Combined provider map (defaults plus user-defined providers).
     pub model_providers: HashMap<String, ModelProviderInfo>,
 
-    /// Maximum number of bytes to include from an AGENTS.md project doc file.
+    /// Maximum total bytes of project instruction content across all selected environments.
     pub project_doc_max_bytes: usize,
 
     /// Additional filenames to try when looking for project-level docs.
@@ -1104,14 +1119,30 @@ pub struct Config {
 pub struct ToolRegistryConfig {
     /// Fail the turn when multiple tools share the same effective name.
     pub error_on_tool_collisions: bool,
+    /// Include authoritative tool information in per-turn request metadata.
+    pub turn_metadata_includes_tool_info: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+const DEFAULT_CODE_MODE_EXEC_YIELD_TIME_MS: u64 = 30_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CodeModeConfig {
+    pub default_exec_yield_time_ms: u64,
     pub excluded_tool_namespaces: Vec<String>,
     pub direct_only_tool_namespaces: Vec<String>,
     /// Keep code mode fail-closed when the standalone host is unavailable.
     pub disable_in_process_fallback: bool,
+}
+
+impl Default for CodeModeConfig {
+    fn default() -> Self {
+        Self {
+            default_exec_yield_time_ms: DEFAULT_CODE_MODE_EXEC_YIELD_TIME_MS,
+            excluded_tool_namespaces: Vec::new(),
+            direct_only_tool_namespaces: Vec::new(),
+            disable_in_process_fallback: false,
+        }
+    }
 }
 
 pub(crate) const DEFAULT_TOKEN_BUDGET_REMINDER_MESSAGE_TEMPLATE: &str = concat!(
@@ -1124,7 +1155,6 @@ const AUTO_COMPACT_FALLBACK_PROMPT_MAX_BYTES: usize = 2000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TokenBudgetConfig {
-    pub mode: TokenBudgetMode,
     pub reminder_threshold_tokens: Option<i64>,
     pub reminder_message_template: String,
     pub guidance_message: Option<String>,
@@ -1217,7 +1247,6 @@ impl TokenBudgetConfig {
 impl Default for TokenBudgetConfig {
     fn default() -> Self {
         Self {
-            mode: TokenBudgetMode::default(),
             reminder_threshold_tokens: None,
             reminder_message_template: DEFAULT_TOKEN_BUDGET_REMINDER_MESSAGE_TEMPLATE.to_string(),
             guidance_message: None,
@@ -1284,10 +1313,12 @@ impl MultiAgentV2Config {
             root_agent_usage_hint_text: Some(default_multi_agent_v2_usage_hint_text(
                 DEFAULT_MULTI_AGENT_V2_ROOT_AGENT_USAGE_HINT_TEXT,
                 max_concurrent_threads_per_session,
+                Some(DEFAULT_MULTI_AGENT_V2_WAIT_AGENT_USAGE_HINT_TEXT),
             )),
             subagent_usage_hint_text: Some(default_multi_agent_v2_usage_hint_text(
                 DEFAULT_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT,
                 max_concurrent_threads_per_session,
+                Some(DEFAULT_MULTI_AGENT_V2_WAIT_AGENT_USAGE_HINT_TEXT),
             )),
             subagent_developer_instructions: None,
             multi_agent_mode_hint_text: None,
@@ -1337,8 +1368,16 @@ impl AuthManagerConfig for Config {
         Config::auth_keyring_backend_kind(self)
     }
 
+    fn forced_login_method(&self) -> Option<ForcedLoginMethod> {
+        self.forced_login_method
+    }
+
     fn forced_chatgpt_workspace_id(&self) -> Option<Vec<String>> {
         self.forced_chatgpt_workspace_id.clone()
+    }
+
+    fn managed_auth_policy(&self) -> ManagedAuthPolicy {
+        self.config_layer_stack.requirements().managed_auth_policy()
     }
 
     fn chatgpt_base_url(&self) -> String {
@@ -1504,6 +1543,9 @@ impl ConfigBuilder {
                 lock_config_layer_stack,
             )
             .await?;
+            if let Some(provenance) = lockfile_toml.base_instructions_provenance {
+                config.base_instructions_provenance = Some(provenance);
+            }
             config.config_lock_toml = Some(Arc::new(expected_lock_config));
             config.config_lock_allow_codex_version_mismatch = allow_codex_version_mismatch;
             config.config_lock_save_fields_resolved_from_model_catalog =
@@ -1606,7 +1648,12 @@ impl Config {
             model_context_window: self.model_context_window,
             model_auto_compact_token_limit: self.model_auto_compact_token_limit,
             tool_output_token_limit: self.tool_output_token_limit,
-            base_instructions: self.base_instructions.clone(),
+            base_instructions: self.base_instructions.clone().filter(|_| {
+                !matches!(
+                    self.base_instructions_provenance,
+                    Some(BaseInstructionsProvenance::Model { .. })
+                )
+            }),
             personality_enabled: self.features.enabled(Feature::Personality),
             personality: self.personality,
             model_catalog: self.model_catalog.clone(),
@@ -1700,10 +1747,17 @@ impl Config {
         {
             let mut plugin_mcp_servers = plugin.mcp_servers.clone();
             self.apply_plugin_mcp_server_requirements(&plugin.config_name, &mut plugin_mcp_servers);
-            let attribution = McpPluginAttribution::new(
-                plugin.config_name.clone(),
-                plugin.display_name().to_string(),
-            );
+            let attribution = if plugin.is_agent_plugin() {
+                McpPluginAttribution::agent_plugin(
+                    plugin.config_name.clone(),
+                    plugin.display_name().to_string(),
+                )
+            } else {
+                McpPluginAttribution::new(
+                    plugin.config_name.clone(),
+                    plugin.display_name().to_string(),
+                )
+            };
             for (name, plugin_server) in plugin_mcp_servers {
                 catalog.register(McpServerRegistration::from_plugin(
                     name,
@@ -2659,6 +2713,9 @@ fn resolve_code_mode_config(config_toml: &ConfigToml) -> CodeModeConfig {
         });
 
     CodeModeConfig {
+        default_exec_yield_time_ms: base
+            .and_then(|config| config.default_exec_yield_time_ms)
+            .unwrap_or(DEFAULT_CODE_MODE_EXEC_YIELD_TIME_MS),
         excluded_tool_namespaces: base
             .and_then(|config| config.excluded_tool_namespaces.as_ref())
             .cloned()
@@ -2709,8 +2766,21 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
     let wait_agent_enabled = base
         .and_then(|config| config.wait_agent_enabled)
         .unwrap_or(default.wait_agent_enabled);
-    let mut default_root_agent_usage_hint_text = default.root_agent_usage_hint_text;
-    let mut default_subagent_usage_hint_text = default.subagent_usage_hint_text;
+    let default_wait_agent_usage_hint_text = if wait_agent_enabled {
+        Some(DEFAULT_MULTI_AGENT_V2_WAIT_AGENT_USAGE_HINT_TEXT)
+    } else {
+        None
+    };
+    let mut default_root_agent_usage_hint_text = Some(default_multi_agent_v2_usage_hint_text(
+        DEFAULT_MULTI_AGENT_V2_ROOT_AGENT_USAGE_HINT_TEXT,
+        max_concurrent_threads_per_session,
+        default_wait_agent_usage_hint_text,
+    ));
+    let mut default_subagent_usage_hint_text = Some(default_multi_agent_v2_usage_hint_text(
+        DEFAULT_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT,
+        max_concurrent_threads_per_session,
+        default_wait_agent_usage_hint_text,
+    ));
     if expose_spawn_agent_model_overrides {
         default_root_agent_usage_hint_text = Some(append_usage_hint_text(
             default_root_agent_usage_hint_text.as_deref(),
@@ -2771,9 +2841,6 @@ fn resolve_token_budget_config(
     }
 
     let token_budget_config = token_budget_toml_config(config_toml.features.as_ref());
-    let mode = token_budget_config
-        .and_then(|config| config.mode)
-        .unwrap_or_default();
     let reminder_threshold_tokens =
         token_budget_config.and_then(|config| config.reminder_threshold_tokens);
     let reminder_message_template = token_budget_config
@@ -2791,7 +2858,6 @@ fn resolve_token_budget_config(
         token_budget_config.and_then(|config| config.auto_compact_fallback_buffer_tokens);
 
     let token_budget = TokenBudgetConfig {
-        mode,
         reminder_threshold_tokens,
         reminder_message_template,
         guidance_message,
@@ -3191,10 +3257,11 @@ impl Config {
             config_layer_stack.requirements(),
             &mut startup_warnings,
         );
-
         // Destructure every field to ensure ConfigRequirements additions are
         // either applied above or handled while constructing the final Config.
         let ConfigRequirements {
+            allowed_login_methods: _,
+            allowed_chatgpt_workspaces: _,
             sqlite_home: _,
             log_dir: _,
             model_catalog_json: _,
@@ -3664,6 +3731,12 @@ impl Config {
                 .and_then(|features| features.tool_registry.as_ref())
                 .and_then(|config| config.error_on_tool_collisions)
                 .unwrap_or_default(),
+            turn_metadata_includes_tool_info: cfg
+                .features
+                .as_ref()
+                .and_then(|features| features.tool_registry.as_ref())
+                .and_then(|config| config.turn_metadata_includes_tool_info)
+                .unwrap_or_default(),
         };
         let code_mode = resolve_code_mode_config(&cfg);
         let multi_agent_v2 = resolve_multi_agent_v2_config(&cfg);
@@ -3861,6 +3934,9 @@ impl Config {
         let base_instructions = base_instructions
             .or(file_base_instructions)
             .or(cfg.instructions.clone());
+        let base_instructions_provenance = base_instructions
+            .as_ref()
+            .map(|_| BaseInstructionsProvenance::Custom);
         let developer_instructions = developer_instructions.or(cfg.developer_instructions);
         let include_permissions_instructions = cfg.include_permissions_instructions.unwrap_or(true);
         let include_apps_instructions = cfg.include_apps_instructions.unwrap_or(true);
@@ -4067,6 +4143,7 @@ impl Config {
             enforce_residency: enforce_residency.value,
             notify: cfg.notify,
             base_instructions,
+            base_instructions_provenance,
             personality,
             developer_instructions,
             compact_prompt,

@@ -2009,6 +2009,7 @@ dependencies = [
  "codex-connectors",
  "codex-core",
  "codex-core-plugins",
+ "codex-diagnostics",
  "codex-exec-server",
  "codex-extension-api",
  "codex-external-agent-migration",
@@ -2035,6 +2036,7 @@ dependencies = [
  "codex-otel",
  "codex-plugin",
  "codex-protocol",
+ "codex-queue-extension",
  "codex-rmcp-client",
  "codex-rollout",
  "codex-sandboxing",
@@ -2405,6 +2407,7 @@ dependencies = [
  "codex-state",
  "codex-stdio-to-uds",
  "codex-terminal-detection",
+ "codex-thread-store",
  "codex-tui",
  "codex-utils-absolute-path",
  "codex-utils-cargo-bin",
@@ -2724,6 +2727,7 @@ dependencies = [
  "codex-context-fragments",
  "codex-core-plugins",
  "codex-core-skills",
+ "codex-diagnostics",
  "codex-exec-server",
  "codex-exec-server-test-support",
  "codex-execpolicy",
@@ -2860,7 +2864,6 @@ dependencies = [
  "codex-app-server-protocol",
  "codex-config",
  "codex-connectors",
- "codex-core-skills",
  "codex-exec-server",
  "codex-exec-server-test-support",
  "codex-git-utils",
@@ -2874,7 +2877,6 @@ dependencies = [
  "codex-protocol",
  "codex-shell-command",
  "codex-skills",
- "codex-skills-extension",
  "codex-tools",
  "codex-utils-absolute-path",
  "codex-utils-path",
@@ -2909,32 +2911,24 @@ dependencies = [
 name = "codex-core-skills"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "codex-analytics",
- "codex-config",
  "codex-context-fragments",
  "codex-exec-server",
- "codex-login",
- "codex-model-provider",
  "codex-otel",
- "codex-protocol",
- "codex-shell-command",
  "codex-skills",
  "codex-utils-absolute-path",
  "codex-utils-path-uri",
- "codex-utils-plugins",
- "dunce",
- "futures",
+ "codex-utils-string",
  "pretty_assertions",
- "serde",
- "serde_json",
- "serde_yaml",
- "shlex",
- "tempfile",
- "tokio",
- "toml 0.9.11+spec-1.1.0",
  "tracing",
- "zip",
+]
+
+[[package]]
+name = "codex-diagnostics"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "pretty_assertions",
 ]
 
 [[package]]
@@ -2994,6 +2988,7 @@ dependencies = [
  "bytes",
  "clatter",
  "codex-api",
+ "codex-config",
  "codex-exec-server-protocol",
  "codex-exec-server-test-support",
  "codex-file-system",
@@ -3004,11 +2999,13 @@ dependencies = [
  "codex-sandboxing",
  "codex-test-binary-support",
  "codex-utils-absolute-path",
+ "codex-utils-home-dir",
  "codex-utils-path-uri",
  "codex-utils-pty",
  "codex-utils-rustls-provider",
  "codex-websocket-client",
  "ctor 0.6.3",
+ "dirs",
  "futures",
  "http 1.4.0",
  "libc",
@@ -3098,6 +3095,7 @@ dependencies = [
  "codex-protocol",
  "codex-tools",
  "codex-utils-absolute-path",
+ "codex-utils-path-uri",
  "pretty_assertions",
  "serde_json",
  "tokio",
@@ -3883,6 +3881,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-queue-extension"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "codex-core",
+ "codex-extension-api",
+ "codex-protocol",
+ "codex-state",
+ "codex-thread-store",
+ "codex-utils-absolute-path",
+ "core_test_support",
+ "pretty_assertions",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "codex-response-debug-context"
 version = "0.0.0"
 dependencies = [
@@ -4086,12 +4105,14 @@ name = "codex-skills"
 version = "0.0.0"
 dependencies = [
  "codex-protocol",
+ "codex-shell-command",
  "codex-utils-absolute-path",
  "codex-utils-path-uri",
  "include_dir",
  "pretty_assertions",
  "serde",
  "serde_yaml",
+ "shlex",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -4208,6 +4229,7 @@ dependencies = [
  "codex-state",
  "codex-utils-absolute-path",
  "codex-utils-path",
+ "codex-utils-path-uri",
  "futures",
  "pretty_assertions",
  "pulldown-cmark",

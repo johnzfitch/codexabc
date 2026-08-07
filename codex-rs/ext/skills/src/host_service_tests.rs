@@ -5,6 +5,9 @@ use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigRequirementsToml;
 use codex_exec_server::LOCAL_FS;
+use codex_skills::LoadedSkillRoot;
+use codex_skills::SkillRootSnapshotCache;
+use codex_skills::SkillRootSnapshots;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::test_support::PathBufExt;
 use codex_utils_absolute_path::test_support::PathExt;
@@ -12,12 +15,33 @@ use codex_utils_plugins::PluginIdentity;
 use codex_utils_plugins::PluginSkillRoot;
 use codex_utils_plugins::SkillDiscoveryMode;
 use pretty_assertions::assert_eq;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use tempfile::TempDir;
+
+#[derive(Default)]
+struct TestPluginSkillSnapshotCache {
+    snapshots: Mutex<HashMap<PluginSkillRoot, LoadedSkillRoot>>,
+}
+
+impl SkillRootSnapshotCache<PluginSkillRoot> for TestPluginSkillSnapshotCache {
+    fn get(&self, root: &PluginSkillRoot) -> Option<LoadedSkillRoot> {
+        self.snapshots.lock().unwrap().get(root).cloned()
+    }
+
+    fn insert(&self, root: PluginSkillRoot, snapshot: LoadedSkillRoot) {
+        self.snapshots.lock().unwrap().insert(root, snapshot);
+    }
+}
+
+fn test_plugin_skill_snapshots() -> SkillRootSnapshots<PluginSkillRoot> {
+    SkillRootSnapshots::new(Arc::new(TestPluginSkillSnapshotCache::default()))
+}
 
 fn write_user_skill(codex_home: &TempDir, dir: &str, name: &str, description: &str) {
     let skill_dir = codex_home.path().join("skills").join(dir);
@@ -184,6 +208,104 @@ async fn skills_for_config_reuses_cache_for_same_effective_config() {
 }
 
 #[tokio::test]
+async fn snapshot_for_config_merges_extension_host_and_legacy_plugin_roots() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let cwd = tempfile::tempdir().expect("tempdir");
+    write_user_skill(&codex_home, "user", "user-skill", "from the host loader");
+    let plugin_skill_path = write_plugin_skill(
+        &codex_home,
+        "test",
+        "sample",
+        "search",
+        "search",
+        "from the plugin loader",
+    );
+    let plugin_skill_root =
+        plugin_skill_root_for_skill_path(&plugin_skill_path, "sample@test", "sample");
+    let config_layer_stack = config_stack(&codex_home, "[skills.bundled]\nenabled = false\n");
+    let input = HostSkillsLoadInput::new(
+        cwd.path().abs(),
+        vec![plugin_skill_root],
+        config_layer_stack,
+        /*bundled_skills_enabled*/ false,
+    );
+    let skills_service = HostSkillsService::new(
+        codex_home.path().abs(),
+        /*bundled_skills_enabled*/ false,
+    );
+
+    let snapshot = skills_service
+        .snapshot_for_config(&input, Some(Arc::clone(&LOCAL_FS)))
+        .await;
+    let skills = snapshot
+        .outcome()
+        .skills
+        .iter()
+        .map(|skill| (skill.name.as_str(), skill.plugin_id.as_deref()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        skills,
+        vec![("sample:search", Some("sample@test")), ("user-skill", None)]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn snapshot_for_config_preserves_host_precedence_for_symlinked_plugin_root() {
+    use std::os::unix::fs::symlink;
+
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let plugin_skill_path = write_plugin_skill(
+        &codex_home,
+        "test",
+        "sample",
+        "search",
+        "search",
+        "shared skill",
+    );
+    let plugin_skill_root =
+        plugin_skill_root_for_skill_path(&plugin_skill_path, "sample@test", "sample");
+    symlink(
+        plugin_skill_root.path.as_path(),
+        codex_home.path().join("skills"),
+    )
+    .expect("symlink user skills root to plugin skills root");
+    let config_layer_stack = config_stack(&codex_home, "[skills.bundled]\nenabled = false\n");
+    let skills_service = HostSkillsService::new(
+        codex_home.path().abs(),
+        /*bundled_skills_enabled*/ false,
+    );
+
+    let outcome = skills_for_config_with_stack(
+        &skills_service,
+        &cwd,
+        &config_layer_stack,
+        &[plugin_skill_root],
+    )
+    .await;
+
+    assert_eq!(
+        outcome.skills,
+        vec![codex_skills::SkillMetadata {
+            name: "sample:search".to_string(),
+            description: "shared skill".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            path_to_skills_md: dunce::canonicalize(plugin_skill_path)
+                .expect("canonical plugin skill path")
+                .abs(),
+            scope: SkillScope::User,
+            plugin_id: None,
+            remote_plugin_id: None,
+        }]
+    );
+}
+
+#[tokio::test]
 async fn skills_for_config_refreshes_cache_when_remote_plugin_id_changes() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let cwd = tempfile::tempdir().expect("tempdir");
@@ -209,7 +331,7 @@ async fn skills_for_config_refreshes_cache_when_remote_plugin_id_changes() {
         config_layer_stack.clone(),
         bundled_skills_enabled_from_stack(&config_layer_stack),
     )
-    .with_plugin_skill_snapshots(Some(PluginSkillSnapshots::for_plugin_load()));
+    .with_plugin_skill_snapshots(Some(test_plugin_skill_snapshots()));
     let plugin_snapshot = skills_service
         .snapshot_for_config(&plugin_input, Some(Arc::clone(&LOCAL_FS)))
         .await;
@@ -619,7 +741,7 @@ async fn skills_for_cwd_uses_cached_result_until_force_reload() {
     );
     let config_input = base_input
         .clone()
-        .with_plugin_skill_snapshots(Some(PluginSkillSnapshots::for_plugin_load()));
+        .with_plugin_skill_snapshots(Some(test_plugin_skill_snapshots()));
     let (config_snapshot, snapshot_a) = tokio::join!(
         skills_service.snapshot_for_config(&config_input, Some(Arc::clone(&LOCAL_FS))),
         skills_service.snapshot_for_cwd(

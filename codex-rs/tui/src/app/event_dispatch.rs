@@ -61,6 +61,20 @@ impl App {
                     tracing::warn!(%thread_id, error = %err, "failed to load older transcript history");
                 }
             }
+            AppEvent::OpenTranscriptExportFilePrompt => {
+                self.chat_widget.show_transcript_export_file_prompt();
+            }
+            AppEvent::ExportTranscript { destination } => {
+                if let Err(error) = self.export_transcript(app_server, destination).await {
+                    self.chat_widget
+                        .add_error_message(format!("Export failed: {error}"));
+                }
+                if self.chat_widget.no_modal_or_popup_active() {
+                    self.chat_widget
+                        .set_queue_autosend_suppressed(/*suppressed*/ false);
+                    self.chat_widget.maybe_send_next_queued_input();
+                }
+            }
             AppEvent::ClearUi { name } => {
                 self.clear_terminal_ui(tui, /*redraw_header*/ false)?;
                 self.reset_app_ui_state_after_clear();
@@ -118,6 +132,9 @@ impl App {
                     /*show_all*/ false,
                     /*include_non_interactive*/ false,
                     picker_app_server,
+                    app_server.request_handle(),
+                    self.primary_thread_id
+                        .or(self.current_displayed_thread_id()),
                 )
                 .await?
                 {
@@ -171,7 +188,13 @@ impl App {
                 tui.frame_requester().schedule_frame();
             }
             AppEvent::ResumeSessionByIdOrName(id_or_name) => {
-                match crate::lookup_session_target_with_app_server(app_server, &id_or_name).await? {
+                match crate::lookup_session_target_with_app_server(
+                    app_server,
+                    &self.config,
+                    &id_or_name,
+                )
+                .await?
+                {
                     Some(target_session) => {
                         return self
                             .resume_target_session(tui, app_server, target_session)
@@ -1150,11 +1173,15 @@ impl App {
                     .await;
             }
             AppEvent::UpdateModel(model) => {
-                self.chat_widget.set_model(&model);
-                self.sync_active_thread_model_setting(app_server, model)
-                    .await;
-                self.sync_active_thread_service_tier_to_cached_session()
-                    .await;
+                let model_changed = self.chat_widget.current_model() != model
+                    || self.chat_widget.current_collaboration_mode().model() != model;
+                if model_changed {
+                    self.chat_widget.set_model(&model);
+                    self.sync_active_thread_model_setting(app_server, model, /*effort*/ None)
+                        .await;
+                    self.sync_active_thread_service_tier_to_cached_session()
+                        .await;
+                }
             }
             AppEvent::UpdatePersonality(personality) => {
                 self.on_update_personality(personality);
@@ -1178,12 +1205,22 @@ impl App {
                 self.chat_widget.open_advanced_reasoning_popup(model);
             }
             AppEvent::ApplyAdvancedReasoning { model, effort } => {
+                let model_changed = self.chat_widget.current_model() != model
+                    || self.chat_widget.current_collaboration_mode().model() != model;
                 let default_effort =
                     self.on_apply_advanced_reasoning(model.as_str(), effort.clone());
-                if let Some(mut params) =
-                    self.active_thread_model_setting_update_params(model.clone())
+                if model_changed {
+                    self.sync_active_thread_model_setting(
+                        app_server,
+                        model.clone(),
+                        Some(effort.clone()),
+                    )
+                    .await;
+                } else if let Some(mut params) =
+                    self.active_thread_reasoning_setting_update_params(Some(effort.clone()))
                 {
-                    params.effort = Some(effort.clone());
+                    params.collaboration_mode =
+                        Some(self.chat_widget.effective_collaboration_mode());
                     self.send_thread_settings_update(app_server, params).await;
                 }
                 self.sync_active_thread_service_tier_to_cached_session()
@@ -1755,6 +1792,11 @@ impl App {
                             .add_error_message(format!("Failed to save default model: {error}"));
                     }
                 }
+            }
+            AppEvent::CyberModelAutoReviewNotice => {
+                self.chat_widget.add_warning_message(
+                    "Cyber models default to \"Approve for me\" for safety reasons.".to_string(),
+                );
             }
             AppEvent::PluginUninstallLoaded {
                 cwd,

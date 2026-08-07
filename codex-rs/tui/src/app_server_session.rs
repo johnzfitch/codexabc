@@ -120,6 +120,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::approvals::GuardianAssessmentEvent;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::models::ActivePermissionProfile;
+use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelAvailabilityNux;
@@ -169,7 +170,7 @@ fn bootstrap_request_error(context: &'static str, err: TypedRequestError) -> col
     color_eyre::eyre::eyre!("{context}: {err}")
 }
 
-fn is_history_pagination_unsupported(source: &JSONRPCErrorError) -> bool {
+pub(crate) fn is_history_pagination_unsupported(source: &JSONRPCErrorError) -> bool {
     if source.code == JSONRPC_METHOD_NOT_FOUND {
         return true;
     }
@@ -1025,9 +1026,9 @@ impl AppServerSession {
     pub(crate) async fn thread_settings_update(
         &mut self,
         params: ThreadSettingsUpdateParams,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if !self.thread_settings_update_supported {
-            return Ok(());
+            return Ok(false);
         }
         let request_id = self.next_request_id();
         match self
@@ -1038,7 +1039,7 @@ impl AppServerSession {
             })
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(true),
             Err(TypedRequestError::Server { source, .. })
                 if is_thread_settings_update_unsupported(&source) =>
             {
@@ -1049,7 +1050,7 @@ impl AppServerSession {
                 // of showing an error every time the user changes model, effort,
                 // personality, or mode.
                 self.thread_settings_update_supported = false;
-                Ok(())
+                Ok(false)
             }
             Err(err) => Err(err).wrap_err("thread/settings/update failed in TUI"),
         }
@@ -1526,6 +1527,7 @@ fn model_preset_from_api_model(model: ApiModel) -> ModelPreset {
         model: model.model,
         display_name: model.display_name,
         description: model.description,
+        model_specialty: model.model_specialty,
         default_reasoning_effort: model.default_reasoning_effort,
         supported_reasoning_efforts: model
             .supported_reasoning_efforts
@@ -1807,7 +1809,12 @@ fn thread_fork_params_from_config(
         sandbox,
         permissions,
         config: config_request_overrides_from_config(&config),
-        base_instructions: config.base_instructions.clone(),
+        base_instructions: config.base_instructions.clone().filter(|_| {
+            !matches!(
+                config.base_instructions_provenance,
+                Some(BaseInstructionsProvenance::Model { .. })
+            )
+        }),
         developer_instructions: with_terminal_visualization_instructions(
             &config,
             config.developer_instructions.clone(),
@@ -2917,11 +2924,12 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let mut config = build_config(&temp_dir).await;
         config.base_instructions = Some("Base override.".to_string());
+        config.base_instructions_provenance = Some(BaseInstructionsProvenance::Custom);
         config.developer_instructions = Some("Developer override.".to_string());
         let thread_id = ThreadId::new();
 
         let params = thread_fork_params_from_config(
-            config,
+            config.clone(),
             thread_id,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
@@ -2932,6 +2940,18 @@ mod tests {
             params.developer_instructions.as_deref(),
             Some("Developer override.")
         );
+
+        config.base_instructions_provenance = Some(BaseInstructionsProvenance::Model {
+            model: "gpt-5.2".to_string(),
+        });
+        let params = thread_fork_params_from_config(
+            config,
+            thread_id,
+            ThreadParamsMode::Remote,
+            /*remote_cwd_override*/ None,
+        );
+
+        assert_eq!(params.base_instructions, None);
     }
 
     #[tokio::test]

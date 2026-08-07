@@ -1,13 +1,11 @@
 use super::*;
+use crate::HostSkillsSnapshot;
 use crate::catalog::SkillAuthority;
 use crate::catalog::SkillPackageId;
 use crate::catalog::SkillResourceId;
 use crate::provider::HostSkillProvider;
 use crate::provider::SkillListQuery;
 use crate::provider::SkillProvider;
-use codex_core_skills::HostSkillsSnapshot;
-use codex_core_skills::loader::SkillRoot;
-use codex_core_skills::loader::load_skills_from_roots;
 use codex_exec_server::LOCAL_FS;
 use codex_extension_api::ContextualUserFragment;
 use codex_protocol::protocol::SkillScope;
@@ -19,6 +17,8 @@ use std::time::UNIX_EPOCH;
 use tokio::sync::Semaphore;
 
 use crate::catalog_prompt::render_available_skills_body;
+use crate::loader::HostSkillRoot;
+use crate::loader::load_and_merge_host_skill_roots;
 
 fn entry(name: &str, description: &str, short_description: Option<&str>) -> SkillCatalogEntry {
     entry_with_path(
@@ -301,29 +301,18 @@ async fn host_alias_roots_follow_core_discovery_order() -> Result<(), Box<dyn st
     }
     let user_root = AbsolutePathBuf::try_from(std::fs::canonicalize(&user_root_path)?)?;
     let system_root = AbsolutePathBuf::try_from(std::fs::canonicalize(&system_root_path)?)?;
-    let outcome = load_skills_from_roots(
-        [
-            SkillRoot {
-                path: user_root.clone(),
-                scope: SkillScope::User,
-                file_system: Arc::clone(&LOCAL_FS),
-                plugin_identity: None,
-                plugin_namespace: None,
-                plugin_root: None,
-                discovery_mode: Default::default(),
-            },
-            SkillRoot {
-                path: system_root.clone(),
-                scope: SkillScope::System,
-                file_system: Arc::clone(&LOCAL_FS),
-                plugin_identity: None,
-                plugin_namespace: None,
-                plugin_root: None,
-                discovery_mode: Default::default(),
-            },
+    let outcome = load_and_merge_host_skill_roots(
+        vec![
+            HostSkillRoot::host(user_root.clone(), SkillScope::User, Arc::clone(&LOCAL_FS)),
+            HostSkillRoot::host(
+                system_root.clone(),
+                SkillScope::System,
+                Arc::clone(&LOCAL_FS),
+            ),
         ],
+        &Semaphore::new(/*permits*/ 2),
+        /*restriction_product*/ None,
         /*plugin_skill_snapshots*/ None,
-        Arc::new(Semaphore::new(2)),
     )
     .await;
     let catalog = HostSkillProvider::new()
@@ -448,9 +437,10 @@ fn mixed_catalog_reserves_executor_omission_marker_by_omitting_host_first() {
         warnings: Vec::new(),
     };
 
-    let (host, executor) = render_combined_available_skills(
-        &host_catalog,
+    let RenderedSkillCatalogs { host, executor, .. } = render_combined_available_skills(
         &executor_catalog,
+        &SkillCatalog::default(),
+        &host_catalog,
         SkillMetadataBudget::Tokens(28),
     );
     let host = host.expect("host catalog should render");
@@ -520,14 +510,34 @@ fn mixed_catalog_prefers_executor_inclusion_over_total_aliased_inclusion() {
         ],
         warnings: Vec::new(),
     };
+    let orchestrator_resource = "skill://orchestrator/one";
+    let orchestrator_catalog = SkillCatalog {
+        entries: vec![
+            SkillCatalogEntry::new(
+                SkillPackageId("o1".to_string()),
+                SkillAuthority::new(SkillSourceKind::Orchestrator, "codex_apps"),
+                "o1",
+                "",
+                SkillResourceId::new(orchestrator_resource),
+            )
+            .with_display_path(orchestrator_resource),
+        ],
+        warnings: Vec::new(),
+    };
 
-    let (host, executor) = render_combined_available_skills(
-        &host_catalog,
+    let RenderedSkillCatalogs {
+        host,
+        executor,
+        orchestrator,
+    } = render_combined_available_skills(
         &executor_catalog,
+        &orchestrator_catalog,
+        &host_catalog,
         SkillMetadataBudget::Tokens(74),
     );
     let host = host.expect("host catalog should render");
     let executor = executor.expect("executor catalog should render");
+    let orchestrator = orchestrator.expect("orchestrator catalog should render");
 
     assert_eq!(
         executor.report,
@@ -549,6 +559,7 @@ fn mixed_catalog_prefers_executor_inclusion_over_total_aliased_inclusion() {
             truncated_description_count: 0,
         }
     );
+    assert_eq!(orchestrator.report.total_count, 1);
     assert_eq!(host.skill_root_lines, Vec::<String>::new());
 }
 

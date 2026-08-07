@@ -53,6 +53,7 @@ use crate::connection_manager::McpConnectionSet;
 use crate::runtime::McpPublicationGate;
 use crate::runtime::McpRuntimeContext;
 use crate::runtime::McpRuntimeInput;
+use crate::runtime::McpStartupPolicy;
 use crate::server::EffectiveMcpServer;
 use crate::tools::ToolInfo;
 
@@ -321,7 +322,14 @@ pub fn effective_mcp_servers_from_configured(
                 }
                 McpServerAuth::OAuth => {}
             }
-            (name, EffectiveMcpServer::configured(server))
+            let agent_plugin = config
+                .mcp_server_catalog
+                .server(&name)
+                .is_some_and(|server| server.source().is_agent_plugin());
+            (
+                name,
+                EffectiveMcpServer::configured(server).with_agent_plugin(agent_plugin),
+            )
         })
         .collect::<HashMap<_, _>>();
     if !host_owned_codex_apps_enabled(config, auth) {
@@ -352,6 +360,7 @@ pub async fn read_mcp_resource(
         /*previous*/ None,
         McpPublicationGate::already_published(),
         McpRuntimeInput {
+            startup_policy: McpStartupPolicy::Eager,
             config: Arc::new(runtime_config),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
@@ -429,6 +438,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
         /*previous*/ None,
         McpPublicationGate::already_published(),
         McpRuntimeInput {
+            startup_policy: McpStartupPolicy::Eager,
             config: Arc::new(runtime_config),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),

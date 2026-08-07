@@ -2,6 +2,7 @@ use super::*;
 use crate::compact::InitialContextInjection;
 use crate::exec_policy::ExecPolicyManager;
 use crate::guardian::GUARDIAN_REVIEWER_NAME;
+use crate::plugins::plugins_manager_for_config;
 use crate::sandboxing::SandboxPermissions;
 use crate::session::step_context::StepContext;
 use crate::test_support::models_manager_with_provider;
@@ -309,6 +310,13 @@ async fn guardian_allows_shell_command_additional_permissions_requests_past_poli
         .permissions
         .set_permission_profile(codex_protocol::models::PermissionProfile::Disabled)
         .expect("test setup should allow disabling the permission profile");
+    let TurnEnvironmentState::Ready(environment) =
+        &mut turn_context_raw.environments.environments[0]
+    else {
+        panic!("primary environment should be ready");
+    };
+    environment.config.permission_profile =
+        config.permissions.permission_profile_state().snapshot();
     config.codex_linux_sandbox_exe = codex_linux_sandbox_exe_or_skip!();
     config
         .features
@@ -424,6 +432,13 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_shell_command_policy_
         .permissions
         .set_permission_profile(codex_protocol::models::PermissionProfile::Disabled)
         .expect("test setup should allow disabling the permission profile");
+    let TurnEnvironmentState::Ready(environment) =
+        &mut turn_context_raw.environments.environments[0]
+    else {
+        panic!("primary environment should be ready");
+    };
+    environment.config.permission_profile =
+        config.permissions.permission_profile_state().snapshot();
     config.approvals_reviewer = ApprovalsReviewer::User;
     config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
     let config = Arc::new(config);
@@ -724,7 +739,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         auth_manager.clone(),
         config.model_provider.clone(),
     );
-    let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
+    let plugins_manager = Arc::new(plugins_manager_for_config(&config));
     let skills_service = Arc::new(HostSkillsService::new(
         config.codex_home.clone(),
         /*bundled_skills_enabled*/ true,

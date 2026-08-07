@@ -1052,6 +1052,7 @@ async fn mcp_tool_call_request_meta_includes_turn_metadata_for_custom_server() {
     assert_eq!(
         meta,
         serde_json::json!({
+            "callId": "call-custom",
             crate::X_CODEX_TURN_METADATA_HEADER: expected_turn_metadata,
         })
     );
@@ -1104,6 +1105,11 @@ async fn mcp_sandbox_cwd_uses_matching_server_environment_uri() -> anyhow::Resul
             /*shell*/ None,
             EnvironmentConfig {
                 allow_login_shell: true,
+                permission_profile: turn_context
+                    .config
+                    .permissions
+                    .permission_profile_state()
+                    .snapshot(),
             },
         )));
 
@@ -1142,6 +1148,7 @@ async fn plugin_mcp_tool_call_request_meta_includes_plugin_id() {
     assert_eq!(
         build_mcp_tool_call_request_meta(&turn_context, "sample", "call-plugin", Some(&metadata),),
         Some(serde_json::json!({
+            "callId": "call-plugin",
             crate::X_CODEX_TURN_METADATA_HEADER: expected_turn_metadata,
             MCP_TOOL_PLUGIN_ID_META_KEY: "sample@test",
         }))
@@ -1287,6 +1294,7 @@ async fn codex_apps_tool_call_request_meta_includes_turn_metadata_and_codex_apps
             Some(&metadata),
         ),
         Some(serde_json::json!({
+            "callId": "call_abc123xyz789",
             crate::X_CODEX_TURN_METADATA_HEADER: expected_turn_metadata,
             MCP_TOOL_CODEX_APPS_META_KEY: {
                 "call_id": "call_abc123xyz789",
@@ -1314,6 +1322,7 @@ async fn codex_apps_tool_call_request_meta_includes_call_id_without_existing_cod
             /*metadata*/ None,
         ),
         Some(serde_json::json!({
+            "callId": "call_abc123xyz789",
             crate::X_CODEX_TURN_METADATA_HEADER: expected_turn_metadata,
             MCP_TOOL_CODEX_APPS_META_KEY: {
                 "call_id": "call_abc123xyz789",

@@ -156,6 +156,16 @@ impl SessionConfiguration {
         &self.permission_profile_state
     }
 
+    pub(super) fn environment_config(&self) -> EnvironmentConfig {
+        EnvironmentConfig {
+            allow_login_shell: self
+                .original_config_do_not_use
+                .permissions
+                .allow_login_shell,
+            permission_profile: self.permission_profile_state.snapshot(),
+        }
+    }
+
     pub(super) fn permission_profile(&self) -> PermissionProfile {
         self.permission_profile_state.permission_profile().clone()
     }
@@ -505,6 +515,7 @@ impl Session {
         installation_id: String,
         auth_manager: Arc<AuthManager>,
         models_manager: SharedModelsManager,
+        model_info: ModelInfo,
         exec_policy: Arc<ExecPolicyManager>,
         tx_event: Sender<Event>,
         agent_status: watch::Sender<AgentStatus>,
@@ -535,6 +546,27 @@ impl Session {
             session_configuration.collaboration_mode.model(),
             session_configuration.provider
         );
+        let base_instructions_provenance = if config.base_instructions.is_some() {
+            Some(
+                config
+                    .base_instructions_provenance
+                    .clone()
+                    .unwrap_or(BaseInstructionsProvenance::Custom),
+            )
+        } else if let Some(inherited_base_instructions) = initial_history.get_base_instructions() {
+            let BaseInstructions { text, provenance } = inherited_base_instructions;
+            provenance.or_else(|| {
+                (text == model_info.get_model_instructions(config.personality)).then(|| {
+                    BaseInstructionsProvenance::Model {
+                        model: model_info.slug.clone(),
+                    }
+                })
+            })
+        } else {
+            Some(BaseInstructionsProvenance::Model {
+                model: model_info.slug.clone(),
+            })
+        };
         let forked_from_id = session_configuration
             .forked_from_thread_id
             .or_else(|| initial_history.forked_from_id());
@@ -558,7 +590,7 @@ impl Session {
 
         let thread_id = match &initial_history {
             InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
-                ThreadId::default()
+                agent_control.generate_thread_id()
             }
             InitialHistory::Resumed(resumed_history) => resumed_history.conversation_id,
         };
@@ -584,6 +616,20 @@ impl Session {
             }
         });
         let initial_auto_compact_window_ids = AutoCompactWindowIds::new_initial();
+        let restore_child_window = matches!(&initial_history, InitialHistory::Forked(_))
+            && session_configuration.session_source.is_non_root_agent()
+            && config.features.enabled(Feature::TokenBudget);
+        if restore_child_window && let InitialHistory::Forked(items) = &mut initial_history {
+            let child_window_id = initial_auto_compact_window_ids.window_id.to_string();
+            for item in items {
+                if let RolloutItem::Compacted(checkpoint) = item {
+                    checkpoint.window_number = Some(0);
+                    checkpoint.first_window_id = Some(child_window_id.clone());
+                    checkpoint.previous_window_id = None;
+                    checkpoint.window_id = Some(child_window_id.clone());
+                }
+            }
+        }
         let agent_control = agent_control.with_session_id(
             session_id,
             config
@@ -635,6 +681,7 @@ impl Session {
                             originator: session_configuration.originator.clone(),
                             base_instructions: BaseInstructions {
                                 text: session_configuration.base_instructions.clone(),
+                                provenance: base_instructions_provenance.clone(),
                             },
                             dynamic_tools: session_configuration.dynamic_tools.clone(),
                             selected_capability_roots: selected_capability_roots.clone(),
@@ -728,6 +775,7 @@ impl Session {
         let mcp_thread_init_for_startup = &mcp_thread_init;
         let thread_extension_data_for_mcp = &thread_extension_data;
         let mcp_originator = session_configuration.originator.clone();
+        let mcp_session_source = session_configuration.session_source.clone();
         let mcp_runtime_cwd = session_configuration
             .environment_selections()
             .first()
@@ -741,7 +789,10 @@ impl Session {
                     &config_for_mcp,
                     mcp_thread_init_for_startup,
                     thread_extension_data_for_mcp,
-                    &mcp_originator,
+                    McpThreadIdentity {
+                        session_source: &mcp_session_source,
+                        originator: &mcp_originator,
+                    },
                     /*ready_selected_capability_roots*/ &[],
                     /*executor_capability_discovery*/ None,
                 )
@@ -943,14 +994,15 @@ impl Session {
                 environment_manager,
                 default_shell.clone(),
                 // Temporary: preserve thread-level behavior until environments supply config.
-                EnvironmentConfig {
-                    allow_login_shell: config.permissions.allow_login_shell,
-                },
+                session_configuration.environment_config(),
                 shell_snapshot,
                 inherited_environments.unwrap_or_default(),
                 config.features.enabled(Feature::DeferredExecutor),
             ));
-            turn_environments.update_selections(session_configuration.environment_selections());
+            turn_environments.update_selections(
+                session_configuration.environment_selections(),
+                &session_configuration.environment_config(),
+            );
             let resolved_environments = turn_environments.snapshot().await;
             let agents_md_manager = Arc::new(AgentsMdManager::new(user_instructions));
             let plugin_skill_warmup = warm_plugins_and_skills_for_session_init(
@@ -982,12 +1034,22 @@ impl Session {
                 );
             }
             session_configuration.thread_name = thread_name.clone();
-            validate_config_lock_if_configured(&session_configuration).await?;
-            export_config_lock_if_configured(&session_configuration, thread_id).await?;
-            let state = SessionState::new_with_auto_compact_window_ids(
+            validate_config_lock_if_configured(
+                &session_configuration,
+                base_instructions_provenance.as_ref(),
+            )
+            .await?;
+            export_config_lock_if_configured(
+                &session_configuration,
+                thread_id,
+                base_instructions_provenance.as_ref(),
+            )
+            .await?;
+            let mut state = SessionState::new_with_auto_compact_window_ids(
                 session_configuration.clone(),
                 initial_auto_compact_window_ids,
             );
+            state.base_instructions_provenance = base_instructions_provenance.clone();
             let managed_network_requirements_configured = config
                 .config_layer_stack
                 .requirements_toml()
@@ -1095,6 +1157,7 @@ impl Session {
                 // Start with an empty connection set. The initialized set is
                 // published after SessionConfigured so MCP events follow it.
                 mcp_runtime,
+                mcp_handler_cache: Default::default(),
                 unified_exec_manager: UnifiedExecProcessManager::new(
                     config.background_terminal_max_timeout,
                 ),
@@ -1169,7 +1232,7 @@ impl Session {
                 executed_tool_calls,
                 code_mode_service: crate::tools::code_mode::CodeModeService::new(
                     Arc::clone(&code_mode_session_provider),
-                    &config.features,
+                    &config.code_mode,
                 ),
                 tool_search_handler_cache: Default::default(),
                 turn_environments: Arc::clone(&turn_environments),
@@ -1260,7 +1323,10 @@ impl Session {
                         config.as_ref(),
                         &sess.services.mcp_thread_init,
                         &sess.services.thread_extension_data,
-                        &session_configuration.originator,
+                        McpThreadIdentity {
+                            session_source: &session_configuration.session_source,
+                            originator: &session_configuration.originator,
+                        },
                         /*ready_selected_capability_roots*/ &[],
                         /*executor_capability_discovery*/ None,
                     )
@@ -1289,6 +1355,12 @@ impl Session {
 
             // record_initial_history can emit events. We record only after the SessionConfiguredEvent is emitted.
             Box::pin(sess.record_initial_history(initial_history)).await;
+            if restore_child_window {
+                sess.state.lock().await.restore_auto_compact_window(
+                    /*window_number*/ 0,
+                    initial_auto_compact_window_ids,
+                );
+            }
             if matches!(&sess.fork_persistence, ForkPersistence::Referenced { .. }) {
                 // Keep the source reserved until the child's history reference is durable.
                 sess.try_ensure_rollout_materialized().await?;
