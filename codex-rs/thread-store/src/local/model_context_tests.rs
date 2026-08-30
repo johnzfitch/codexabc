@@ -11,18 +11,18 @@ use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::ItemCompletedEvent;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::user_input::UserInput;
+use codex_rollout::CompactedItem;
+use codex_rollout::RolloutItem;
+use codex_rollout::RolloutLine;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -386,8 +386,33 @@ async fn replays_nested_archived_lineage_from_frozen_prefix() {
         turn_complete("child-turn"),
     ];
     assert_eq!(
-        serde_json::to_value(context.items).expect("serialize context"),
+        serde_json::to_value(&context.items).expect("serialize context"),
+        serde_json::to_value(&expected).expect("serialize expected context")
+    );
+    // The same frozen lineage must replay from compressed files, without materializing or
+    // accidentally including the archived root's records after the inherited cutoff.
+    for path in [&archived_root, &middle_path, &child_path] {
+        let input = std::fs::File::open(path).expect("open rollout");
+        let output = std::fs::File::create(path.with_extension("jsonl.zst"))
+            .expect("create compressed rollout");
+        zstd::stream::copy_encode(input, output, /*level*/ 3).expect("compress rollout");
+        std::fs::remove_file(path).expect("remove plain rollout");
+    }
+    let compressed_context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id: child_id,
+            include_archived: false,
+        })
+        .await
+        .expect("load compressed lineage model context");
+    assert_eq!(
+        serde_json::to_value(compressed_context.items).expect("serialize compressed context"),
         serde_json::to_value(expected).expect("serialize expected context")
+    );
+    assert!(
+        [archived_root, middle_path, child_path]
+            .iter()
+            .all(|path| !path.exists())
     );
 }
 
@@ -541,15 +566,18 @@ fn turn_complete(turn_id: &str) -> RolloutItem {
 }
 
 fn user_message(message: &str) -> RolloutItem {
-    RolloutItem::ResponseItem(ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: message.to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    })
+    RolloutItem::ResponseItem(
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: message.to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+        .into(),
+    )
 }
 
 fn contextual_user_message() -> RolloutItem {
@@ -575,15 +603,18 @@ fn completed_user_message(turn_id: &str, message: &str) -> RolloutItem {
 }
 
 fn agent_message(message: &str) -> RolloutItem {
-    RolloutItem::ResponseItem(ResponseItem::AgentMessage {
-        id: None,
-        author: "worker".to_string(),
-        recipient: "root".to_string(),
-        content: vec![AgentMessageInputContent::InputText {
-            text: message.to_string(),
-        }],
-        internal_chat_message_metadata_passthrough: None,
-    })
+    RolloutItem::ResponseItem(
+        ResponseItem::AgentMessage {
+            id: None,
+            author: "worker".to_string(),
+            recipient: "root".to_string(),
+            content: vec![AgentMessageInputContent::InputText {
+                text: message.to_string(),
+            }],
+            internal_chat_message_metadata_passthrough: None,
+        }
+        .into(),
+    )
 }
 
 fn turn_context(root: &Path, turn_id: &str) -> RolloutItem {
@@ -597,6 +628,7 @@ fn turn_context(root: &Path, turn_id: &str) -> RolloutItem {
         approvals_reviewer: None,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         permission_profile: None,
+        active_permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,
         model: "test-model".to_string(),
@@ -606,6 +638,7 @@ fn turn_context(root: &Path, turn_id: &str) -> RolloutItem {
         multi_agent_version: None,
         multi_agent_mode: None,
         realtime_active: None,
+        cyber_access_program: None,
         effort: None,
         summary: ReasoningSummary::Auto,
     })
@@ -614,7 +647,9 @@ fn turn_context(root: &Path, turn_id: &str) -> RolloutItem {
 fn compacted(message: &str, replacement_history: Option<Vec<ResponseItem>>) -> RolloutItem {
     RolloutItem::Compacted(CompactedItem {
         message: message.to_string(),
-        replacement_history,
+        replacement_history: replacement_history
+            .map(|items| items.into_iter().map(Into::into).collect()),
+        mcp_resource_origins: None,
         window_number: Some(1),
         first_window_id: None,
         previous_window_id: None,
